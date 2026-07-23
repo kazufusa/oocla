@@ -1,0 +1,278 @@
+// Package bridge implements core.Generator on top of the claude CLI.
+package bridge
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/kazufusa/oocla/internal/claudecli"
+	"github.com/kazufusa/oocla/internal/core"
+	"github.com/kazufusa/oocla/internal/mcpshim"
+)
+
+// stopReasonToolUse is reported when the turn ended because the model asked to
+// call a tool. The CLI never gets to emit its own result event in that case:
+// oocla stops the turn first, so that the call reaches the API client instead
+// of being answered locally.
+const stopReasonToolUse = "tool_use"
+
+// stopReasonEndTurn is what a completed turn reports.
+const stopReasonEndTurn = "end_turn"
+
+// structuredOutputTool is the tool the CLI adds when --json-schema is set. The
+// constrained answer arrives as a call to it rather than as text, so it is the
+// answer, not a tool call to hand to the API client.
+const structuredOutputTool = "StructuredOutput"
+
+// Bridge turns one generation request into one claude CLI invocation.
+type Bridge struct {
+	Runner *claudecli.Runner
+
+	// Exe is the oocla binary the CLI should spawn as its MCP tool server.
+	// It defaults to the running executable.
+	Exe string
+
+	// Bare runs the CLI in its minimal mode, which removes the last of the
+	// context it injects but restricts it to API key authentication. See
+	// claudecli.Options.Bare.
+	Bare bool
+}
+
+// New returns a Bridge driving the claude binary on PATH.
+func New() *Bridge { return &Bridge{Runner: claudecli.NewRunner()} }
+
+// Close releases the runner's scratch directory.
+func (b *Bridge) Close() error { return b.Runner.Cleanup() }
+
+func (b *Bridge) exe() (string, error) {
+	if b.Exe != "" {
+		return b.Exe, nil
+	}
+	return os.Executable()
+}
+
+// Generate runs a single turn and collects the answer. When emit is non-nil the
+// CLI is asked for token-level events and each piece is forwarded as it lands.
+func (b *Bridge) Generate(ctx context.Context, in core.GenerateInput, emit func(core.StreamChunk) error) (core.GenerateOutput, error) {
+	opts := claudecli.Options{
+		Model:        in.Model,
+		SystemPrompt: in.Prompt.System,
+		JSONSchema:   in.JSONSchema,
+		Effort:       in.Effort,
+		Partial:      emit != nil,
+		Bare:         b.Bare,
+	}
+	if len(in.Tools) > 0 {
+		exe, err := b.exe()
+		if err != nil {
+			return core.GenerateOutput{}, fmt.Errorf("bridge: locating the oocla binary: %w", err)
+		}
+		cfg, allowed, err := mcpshim.Config(exe, in.Tools)
+		if err != nil {
+			return core.GenerateOutput{}, err
+		}
+		opts.MCPConfigJSON = cfg
+		opts.AllowedTools = allowed
+	}
+
+	run, err := b.Runner.Start(ctx, opts, in.Prompt.User)
+	if err != nil {
+		return core.GenerateOutput{}, err
+	}
+	defer run.Kill()
+	return collect(run, emit != nil, in, emit)
+}
+
+// collect drains one run into an answer.
+func collect(run *claudecli.Run, streaming bool, in core.GenerateInput, emit func(core.StreamChunk) error) (core.GenerateOutput, error) {
+	// A JSON Schema changes what a tool call means, and either JSON mode makes
+	// the text unusable until it is complete.
+	structured := in.JSONSchema != ""
+	buffered := structured || in.UnwrapJSON
+
+	var (
+		text       strings.Builder
+		thinking   strings.Builder
+		out        core.GenerateOutput
+		result     *claudecli.Result
+		calling    bool
+		structural string
+	)
+
+	addToolCall := func(tu *claudecli.ToolUse) error {
+		tc, err := toolCall(tu)
+		if err != nil {
+			return err
+		}
+		out.ToolCalls = append(out.ToolCalls, tc)
+		if streaming {
+			return emit(core.StreamChunk{ToolCalls: []core.ToolCall{tc}})
+		}
+		return nil
+	}
+
+events:
+	for {
+		ev, err := run.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return core.GenerateOutput{}, err
+		}
+		switch ev.Kind {
+		// With --include-partial-messages the CLI sends token deltas and, at
+		// the end of each block, the assembled message. Only one of the two may
+		// be counted, or the answer comes out doubled.
+		case claudecli.KindText:
+			if !streaming {
+				text.WriteString(ev.Text)
+			}
+		case claudecli.KindThinking:
+			if !streaming && in.IncludeThinking {
+				thinking.WriteString(ev.Text)
+			}
+		case claudecli.KindTextDelta:
+			text.WriteString(ev.Text)
+			// Under a schema the prose is only a preamble to the structured
+			// answer, which Ollama does not include; in JSON mode the text
+			// still has to have its code fence removed. Either way, sending it
+			// as it arrives would make the stream disagree with the answer.
+			if buffered {
+				continue
+			}
+			if err := emit(core.StreamChunk{Text: ev.Text}); err != nil {
+				return core.GenerateOutput{}, err
+			}
+		// The model always reasons; whether the client sees it is the
+		// client's call, so unreported thinking is dropped rather than
+		// collected and then hidden.
+		case claudecli.KindThinkingDelta:
+			if !in.IncludeThinking {
+				continue
+			}
+			thinking.WriteString(ev.Text)
+			if err := emit(core.StreamChunk{Thinking: ev.Text}); err != nil {
+				return core.GenerateOutput{}, err
+			}
+
+		// A tool call ends the turn. The API contract is that the client runs
+		// the tool, so the CLI must not be allowed to run it and answer from
+		// the result. Siblings decoded from the same line are collected first:
+		// one message can carry several calls.
+		case claudecli.KindToolUse:
+			if structured && ev.ToolUse.Name == structuredOutputTool {
+				structural = compact(ev.ToolUse.Input)
+				calling = true
+				break events
+			}
+			if err := addToolCall(ev.ToolUse); err != nil {
+				return core.GenerateOutput{}, err
+			}
+			for _, sib := range run.Drain() {
+				if sib.Kind == claudecli.KindToolUse {
+					if err := addToolCall(sib.ToolUse); err != nil {
+						return core.GenerateOutput{}, err
+					}
+				}
+			}
+			calling = true
+			break events
+
+		case claudecli.KindResult:
+			result = ev.Result
+		}
+	}
+
+	out.Text = text.String()
+	out.Thinking = thinking.String()
+
+	if structural != "" {
+		// The constrained answer replaces the prose that led up to it.
+		out.Text = structural
+		run.Stop()
+		out.StopReason = stopReasonEndTurn
+		return out, flushBuffered(out.Text, streaming, emit)
+	}
+	if calling {
+		// The turn was cut short, so there are no usage figures to report.
+		run.Stop()
+		out.StopReason = stopReasonToolUse
+		return out, flushBuffered(out.Text, streaming && buffered, emit)
+	}
+	// A failing turn reports why in its result event and *also* exits non-zero.
+	// The result is the better message, so the exit status is only used when
+	// there was no result to explain it.
+	closeErr := run.Close()
+	if result == nil {
+		if closeErr != nil {
+			return core.GenerateOutput{}, closeErr
+		}
+		return core.GenerateOutput{}, errors.New("bridge: claude produced no result event")
+	}
+	if result.IsError {
+		// The CLI flags a failed turn with is_error even when the subtype still
+		// says success, so the subtype is only worth reporting when it differs.
+		if result.Subtype != "" && result.Subtype != "success" {
+			return core.GenerateOutput{}, fmt.Errorf("bridge: claude reported %s: %s", result.Subtype, result.Text)
+		}
+		return core.GenerateOutput{}, fmt.Errorf("bridge: claude reported an error: %s", result.Text)
+	}
+	if closeErr != nil {
+		return core.GenerateOutput{}, closeErr
+	}
+	if in.UnwrapJSON {
+		out.Text = core.UnwrapJSON(out.Text)
+		if err := flushBuffered(out.Text, streaming, emit); err != nil {
+			return core.GenerateOutput{}, err
+		}
+	}
+
+	out.StopReason = result.StopReason
+	out.InputTokens = result.Usage.InputTokens
+	out.OutputTokens = result.Usage.OutputTokens
+	out.Total = time.Duration(result.DurationMS) * time.Millisecond
+	out.API = time.Duration(result.DurationAPIMS) * time.Millisecond
+	return out, nil
+}
+
+// flushBuffered sends an answer that was held back, as a single chunk.
+func flushBuffered(text string, streaming bool, emit func(core.StreamChunk) error) error {
+	if !streaming || text == "" {
+		return nil
+	}
+	return emit(core.StreamChunk{Text: text})
+}
+
+// compact normalizes a structured answer so clients get one canonical form.
+func compact(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return string(raw)
+	}
+	return buf.String()
+}
+
+// toolCall converts a CLI tool_use block into the neutral shape.
+func toolCall(tu *claudecli.ToolUse) (core.ToolCall, error) {
+	args := map[string]any{}
+	if len(tu.Input) > 0 {
+		if err := json.Unmarshal(tu.Input, &args); err != nil {
+			return core.ToolCall{}, fmt.Errorf("bridge: tool %q arguments: %w", tu.Name, err)
+		}
+	}
+	return core.ToolCall{Function: core.ToolCallFunction{
+		Name:      strings.TrimPrefix(tu.Name, mcpshim.ToolPrefix),
+		Arguments: args,
+	}}, nil
+}

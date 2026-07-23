@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Kept in step with the go directive in go.mod.
+          go-version: '1.25'
+          cache: true
+
+      # gofmt, vet, tests under the race detector, and a build. The e2e suite
+      # is deliberately absent: it needs an authenticated claude CLI and spends
+      # money on every run.
+      - run: make check
+
+  build-matrix:
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      # oocla ships as a single binary, so cross-compilation staying green is
+      # part of the contract. Process groups and signals differ per platform.
+      - env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build ./...

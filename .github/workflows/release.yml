@@ -1,0 +1,71 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gh release --verify-tag needs the tag object, and `make dist`
+          # derives its default version from git describe.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      # A tag is not a shortcut past the harness.
+      - run: make check
+
+      - name: Build artifacts
+        run: make dist VERSION=${{ github.ref_name }}
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # A tag like v1.0.0-rc1 is a prerelease; a plain v1.0.0 is not.
+          case "$TAG" in
+            *-*) prerelease=--prerelease ;;
+            *)   prerelease= ;;
+          esac
+          gh release create "$TAG" dist/* \
+            --title "$TAG" \
+            --generate-notes \
+            --verify-tag \
+            $prerelease
+
+      # Pushes the formula to kazufusa/homebrew-tap so that
+      # `brew install kazufusa/tap/oocla` picks the release up, on macOS and
+      # Linuxbrew alike. Needs TAP_GITHUB_TOKEN, a PAT with write access to
+      # the tap repository; without it the step is skipped, not failed.
+      # Prereleases never reach the tap.
+      - name: Update Homebrew tap
+        if: "!contains(github.ref_name, '-')"
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "TAP_GITHUB_TOKEN is not set; skipping the tap update"
+            exit 0
+          fi
+          make formula VERSION="$TAG" > oocla.rb
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/kazufusa/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          mv oocla.rb tap/Formula/oocla.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/oocla.rb
+          git diff --cached --quiet || git commit -m "oocla $TAG"
+          git push
