@@ -58,9 +58,9 @@ $ go install github.com/kazufusa/oocla/cmd/oocla@latest
 `oocla_<version>_<os>_<arch>` をダウンロードして展開する。
 
 ```
-$ tar -xzf oocla_1.1.0_linux_amd64.tar.gz
-$ ./oocla_1.1.0_linux_amd64/oocla version
-v1.1.0
+$ tar -xzf oocla_1.2.0_linux_amd64.tar.gz
+$ ./oocla_1.2.0_linux_amd64/oocla version
+v1.2.0
 ```
 
 Linux / macOS / Windows の amd64 と arm64 を用意している。
@@ -198,8 +198,8 @@ make dist    # dist/ にリリース成果物を作る
 `make e2e` は実際に `claude` を呼ぶので課金が発生する。認証済みの環境が必要。
 
 リリースは `v` で始まるタグを push すると走る。CI が `make check` を通してから
-`make dist` の成果物をそのまま公開する。`make dist VERSION=v1.1.0` をローカルで
-実行すれば同じものが手元にできる。`v1.1.0-rc1` のようにハイフンを含むタグは
+`make dist` の成果物をそのまま公開する。`make dist VERSION=v1.2.0` をローカルで
+実行すれば同じものが手元にできる。`v1.2.0-rc1` のようにハイフンを含むタグは
 プレリリース扱いになる。
 
 設計と実測結果は `docs/DESIGN.md`。

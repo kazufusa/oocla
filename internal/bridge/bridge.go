@@ -85,18 +85,35 @@ func (b *Bridge) shimName() string {
 	return mcpshim.ServerName
 }
 
+// ProbeShim reports whether this environment lets the tool shim start, so a
+// blocked shim can be announced once at startup instead of surprising the
+// first tools request. The per-request detection stays authoritative; this is
+// advance notice.
+func (b *Bridge) ProbeShim(ctx context.Context) (bool, error) {
+	exe, err := b.exe()
+	if err != nil {
+		return false, err
+	}
+	return b.Runner.ProbeMCPName(ctx, b.shimName(), exe)
+}
+
 // Generate runs a single turn and collects the answer. When emit is non-nil the
 // CLI is asked for token-level events and each piece is forwarded as it lands.
 func (b *Bridge) Generate(ctx context.Context, in core.GenerateInput, emit func(core.StreamChunk) error) (core.GenerateOutput, error) {
 	if b.PromptTools && len(in.Tools) > 0 {
 		return b.generateWithPromptTools(ctx, in, emit)
 	}
+	// Partial events are also requested for turns that can end at a tool call
+	// or a structured answer: those are cut before the CLI's result event, and
+	// the message_delta partial event is then the only source of the final
+	// output token count.
+	partial := emit != nil || len(in.Tools) > 0 || in.JSONSchema != ""
 	opts := claudecli.Options{
 		Model:        in.Model,
 		SystemPrompt: in.Prompt.System,
 		JSONSchema:   in.JSONSchema,
 		Effort:       in.Effort,
-		Partial:      emit != nil,
+		Partial:      partial,
 		Bare:         b.Bare,
 	}
 	if len(in.Tools) > 0 {
@@ -121,7 +138,7 @@ func (b *Bridge) Generate(ctx context.Context, in core.GenerateInput, emit func(
 	if len(in.Tools) > 0 {
 		expectServer = b.shimName()
 	}
-	out, err := collect(run, emit != nil, in, emit, expectServer)
+	out, err := collect(run, emit != nil, partial, in, emit, expectServer)
 	if errors.Is(err, errMCPBlocked) {
 		// The turn is cut before the model answers, so switching strategies
 		// costs one aborted call, not a wasted answer.
@@ -133,10 +150,12 @@ func (b *Bridge) Generate(ctx context.Context, in core.GenerateInput, emit func(
 	return out, err
 }
 
-// collect drains one run into an answer. expectServer names the MCP server
-// the turn's tools were configured as, which the init event must then
-// confirm; empty means no tools were configured.
-func collect(run *claudecli.Run, streaming bool, in core.GenerateInput, emit func(core.StreamChunk) error, expectServer string) (core.GenerateOutput, error) {
+// collect drains one run into an answer. partial says whether the CLI was
+// asked for token-level events; streaming says whether the caller wants them
+// forwarded. expectServer names the MCP server the turn's tools were
+// configured as, which the init event must then confirm; empty means no tools
+// were configured.
+func collect(run *claudecli.Run, streaming, partial bool, in core.GenerateInput, emit func(core.StreamChunk) error, expectServer string) (core.GenerateOutput, error) {
 	// A JSON Schema changes what a tool call means, and either JSON mode makes
 	// the text unusable until it is complete.
 	structured := in.JSONSchema != ""
@@ -149,6 +168,11 @@ func collect(run *claudecli.Run, streaming bool, in core.GenerateInput, emit fun
 		result     *claudecli.Result
 		calling    bool
 		structural string
+		// inputTokens comes from any usage snapshot (the request size is
+		// fixed); outputTokens only from message_delta, whose count is final.
+		// Both are for turns that end before the CLI reports its result.
+		inputTokens  int
+		outputTokens int
 	)
 
 	prefix := mcpshim.ToolPrefix
@@ -176,21 +200,24 @@ events:
 		if err != nil {
 			return core.GenerateOutput{}, err
 		}
+		if ev.Usage != nil && ev.Usage.InputTokens > 0 {
+			inputTokens = ev.Usage.InputTokens
+		}
 		switch ev.Kind {
 		case claudecli.KindInit:
 			if expectServer != "" && !slices.Contains(ev.MCPServers, expectServer) {
 				return core.GenerateOutput{}, errMCPBlocked
 			}
 
-		// With --include-partial-messages the CLI sends token deltas and, at
-		// the end of each block, the assembled message. Only one of the two may
-		// be counted, or the answer comes out doubled.
+		// In partial mode the CLI sends token deltas and, at the end of each
+		// block, the assembled message. Only one of the two may be counted,
+		// or the answer comes out doubled.
 		case claudecli.KindText:
-			if !streaming {
+			if !partial {
 				text.WriteString(ev.Text)
 			}
 		case claudecli.KindThinking:
-			if !streaming && in.IncludeThinking {
+			if !partial && in.IncludeThinking {
 				thinking.WriteString(ev.Text)
 			}
 		case claudecli.KindTextDelta:
@@ -199,7 +226,7 @@ events:
 			// answer, which Ollama does not include; in JSON mode the text
 			// still has to have its code fence removed. Either way, sending it
 			// as it arrives would make the stream disagree with the answer.
-			if buffered {
+			if buffered || !streaming {
 				continue
 			}
 			if err := emit(core.StreamChunk{Text: ev.Text}); err != nil {
@@ -213,6 +240,9 @@ events:
 				continue
 			}
 			thinking.WriteString(ev.Text)
+			if !streaming {
+				continue
+			}
 			if err := emit(core.StreamChunk{Thinking: ev.Text}); err != nil {
 				return core.GenerateOutput{}, err
 			}
@@ -221,11 +251,22 @@ events:
 		// the tool, so the CLI must not be allowed to run it and answer from
 		// the result. Siblings decoded from the same line are collected first:
 		// one message can carry several calls.
+		//
+		// In partial mode the turn is not cut here but at the message_delta
+		// that follows the message's last block: it carries the final output
+		// token count, and the CLI only moves on to executing the tool after
+		// the message ends, so waiting for it costs nothing.
 		case claudecli.KindToolUse:
+			if structural != "" {
+				continue
+			}
 			if structured && ev.ToolUse.Name == structuredOutputTool {
 				structural = compact(ev.ToolUse.Input)
 				calling = true
-				break events
+				if !partial {
+					break events
+				}
+				continue
 			}
 			if err := addToolCall(ev.ToolUse); err != nil {
 				return core.GenerateOutput{}, err
@@ -238,7 +279,21 @@ events:
 				}
 			}
 			calling = true
-			break events
+			if !partial {
+				break events
+			}
+
+		case claudecli.KindMessageDelta:
+			if ev.Usage != nil && ev.Usage.OutputTokens > 0 {
+				outputTokens = ev.Usage.OutputTokens
+			}
+			if calling {
+				break events
+			}
+		case claudecli.KindMessageStop:
+			if calling {
+				break events
+			}
 
 		case claudecli.KindResult:
 			result = ev.Result
@@ -253,12 +308,13 @@ events:
 		out.Text = structural
 		run.Stop()
 		out.StopReason = stopReasonEndTurn
+		out.InputTokens, out.OutputTokens = inputTokens, outputTokens
 		return out, flushBuffered(out.Text, streaming, emit)
 	}
 	if calling {
-		// The turn was cut short, so there are no usage figures to report.
 		run.Stop()
 		out.StopReason = stopReasonToolUse
+		out.InputTokens, out.OutputTokens = inputTokens, outputTokens
 		return out, flushBuffered(out.Text, streaming && buffered, emit)
 	}
 	// A failing turn reports why in its result event and *also* exits non-zero.
