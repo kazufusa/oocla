@@ -68,6 +68,10 @@ type Event struct {
 	Text    string
 	ToolUse *ToolUse
 	Result  *Result
+	// MCPServers lists the connected MCP servers, set for KindInit. A server
+	// that was configured but is absent here was not started, e.g. blocked by
+	// a managed policy.
+	MCPServers []string
 	// Raw is the undecoded line, set for KindOther.
 	Raw json.RawMessage
 }
@@ -144,6 +148,11 @@ type envelope struct {
 	Subtype   string `json:"subtype"`
 	SessionID string `json:"session_id"`
 
+	MCPServers []struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	} `json:"mcp_servers"`
+
 	Message struct {
 		Content []struct {
 			Type     string          `json:"type"`
@@ -190,7 +199,13 @@ func decodeLine(line []byte) ([]Event, error) {
 	switch env.Type {
 	case "system":
 		if env.Subtype == "init" {
-			return []Event{{Kind: KindInit, SessionID: env.SessionID}}, nil
+			var connected []string
+			for _, s := range env.MCPServers {
+				if s.Status == "connected" {
+					connected = append(connected, s.Name)
+				}
+			}
+			return []Event{{Kind: KindInit, SessionID: env.SessionID, MCPServers: connected}}, nil
 		}
 	case "assistant":
 		return assistantEvents(env), nil

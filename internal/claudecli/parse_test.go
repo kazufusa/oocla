@@ -188,3 +188,29 @@ func TestDecodeMalformedLineIsAnError(t *testing.T) {
 		t.Fatalf("err = %v, want a decode error", err)
 	}
 }
+
+func TestDecodeInitReportsConnectedMCPServers(t *testing.T) {
+	d := NewDecoder(strings.NewReader(
+		`{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{"name":"oocla","status":"connected"},{"name":"other","status":"failed"}]}` + "\n"))
+	ev, err := d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Kind != KindInit {
+		t.Fatalf("Kind = %q", ev.Kind)
+	}
+	if len(ev.MCPServers) != 1 || ev.MCPServers[0] != "oocla" {
+		t.Errorf("MCPServers = %v, want only the connected server", ev.MCPServers)
+	}
+}
+
+func TestDecodeInitWithoutMCPServersIsEmpty(t *testing.T) {
+	d := NewDecoder(strings.NewReader(`{"type":"system","subtype":"init","session_id":"s","mcp_servers":[]}` + "\n"))
+	ev, err := d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev.MCPServers) != 0 {
+		t.Errorf("MCPServers = %v, want empty", ev.MCPServers)
+	}
+}

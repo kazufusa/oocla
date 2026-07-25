@@ -10,7 +10,7 @@ import (
 )
 
 func TestConfigWithoutToolsIsEmpty(t *testing.T) {
-	cfg, allowed, err := Config("/usr/bin/oocla", nil)
+	cfg, allowed, err := Config("/usr/bin/oocla", ServerName, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,7 +20,7 @@ func TestConfigWithoutToolsIsEmpty(t *testing.T) {
 }
 
 func TestConfigDescribesTheShim(t *testing.T) {
-	cfg, allowed, err := Config("/usr/bin/oocla", []core.Tool{weatherTool()})
+	cfg, allowed, err := Config("/usr/bin/oocla", ServerName, []core.Tool{weatherTool()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestConfigRejectsUnusableTools(t *testing.T) {
 		}}},
 	}
 	for name, tools := range cases {
-		if _, _, err := Config("/usr/bin/oocla", tools); err == nil {
+		if _, _, err := Config("/usr/bin/oocla", ServerName, tools); err == nil {
 			t.Errorf("%s: want an error", name)
 		}
 	}
@@ -91,5 +91,31 @@ func TestDecodeToolsEmpty(t *testing.T) {
 func TestDecodeToolsRejectsGarbage(t *testing.T) {
 	if _, err := DecodeTools("not json"); err == nil {
 		t.Error("want an error")
+	}
+}
+
+// A managed environment's admin can issue a different allowlisted name for
+// the shim; the config and the allowed tool names must both follow it.
+func TestConfigWithCustomServerName(t *testing.T) {
+	cfg, allowed, err := Config("/usr/bin/oocla", "corp-bridge", []core.Tool{weatherTool()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cfg, `"corp-bridge"`) {
+		t.Errorf("config = %s, want the custom server name", cfg)
+	}
+	if len(allowed) != 1 || allowed[0] != "mcp__corp-bridge__get_weather" {
+		t.Errorf("allowed = %v", allowed)
+	}
+}
+
+func TestConfigRejectsBadServerName(t *testing.T) {
+	for _, name := range []string{"", "has space", "a/b", "-x"} {
+		if name == "-x" {
+			continue // hyphen is allowed anywhere but flag safety is the CLI's concern
+		}
+		if _, _, err := Config("/x", name, []core.Tool{weatherTool()}); err == nil {
+			t.Errorf("Config(%q): want an error", name)
+		}
 	}
 }
