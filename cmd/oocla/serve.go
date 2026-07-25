@@ -14,6 +14,7 @@ import (
 	"github.com/kazufusa/oocla/internal/bridge"
 	"github.com/kazufusa/oocla/internal/core"
 	"github.com/kazufusa/oocla/internal/httpapi"
+	"github.com/kazufusa/oocla/internal/mcpshim"
 	"github.com/kazufusa/oocla/internal/ollama"
 	"github.com/kazufusa/oocla/internal/openai"
 )
@@ -31,13 +32,24 @@ func serve(args []string) error {
 	bare := fs.Bool("bare", false,
 		"run claude in minimal mode: removes the base prompt and the injected user/date context, "+
 			"but the CLI then accepts only ANTHROPIC_API_KEY or apiKeyHelper, not an OAuth login")
+	// For managed environments whose admin allowlists MCP servers under an
+	// issued name. Not for matching a name allowlisted for something else.
+	shimName := fs.String("internal-mcp-shim-name", mcpshim.ServerName,
+		"MCP server name the tool shim registers under; use the name your administrator allowlisted for oocla")
+	promptTools := fs.Bool("internal-prompt-tools", false,
+		"never use the MCP tool shim; always carry tools in the prompt (debugging, or environments that block the shim)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if !mcpshim.ValidServerName(*shimName) {
+		return fmt.Errorf("internal-mcp-shim-name: %q may only contain letters, digits, underscore and hyphen", *shimName)
 	}
 
 	b := bridge.New()
 	b.Runner.Bin = *claudeBin
 	b.Bare = *bare
+	b.ShimName = *shimName
+	b.PromptTools = *promptTools
 
 	// The catalog has no files behind it, so modified_at is pinned at startup
 	// rather than moving on every request.

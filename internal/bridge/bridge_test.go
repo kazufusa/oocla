@@ -428,3 +428,206 @@ func TestGenerateReportsProcessFailure(t *testing.T) {
 		t.Errorf("err = %v, want stderr surfaced", err)
 	}
 }
+
+// mcpAwareStub is a stub claude that reports no MCP servers when one was
+// configured (a managed policy blocking it) and answers the fallback rerun,
+// which is recognizable by its --json-schema and absent --mcp-config.
+func mcpAwareStub(t *testing.T, fallbackScript string) *Bridge {
+	t.Helper()
+	return stubBridge(t, `
+case "$*" in
+*--mcp-config*)
+  echo '{"type":"system","subtype":"init","session_id":"s","mcp_servers":[]}'
+  sleep 5
+  ;;
+*)
+`+fallbackScript+`
+  sleep 5
+  ;;
+esac`)
+}
+
+func toolInput() core.GenerateInput {
+	in := input()
+	in.Tools = []core.Tool{{Type: "function", Function: core.ToolFunction{
+		Name: "get_weather", Parameters: json.RawMessage(`{"type":"object"}`),
+	}}}
+	return in
+}
+
+// A managed policy can block oocla's MCP server. The turn must then fall back
+// to prompting, and the client still gets tool calls.
+func TestGenerateFallsBackToPromptToolsWhenMCPIsBlocked(t *testing.T) {
+	b := mcpAwareStub(t, `
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"StructuredOutput","input":{"content":"","tool_calls":[{"name":"get_weather","arguments":{"city":"Tokyo"}}]}}]}}'`)
+	out, err := b.Generate(context.Background(), toolInput(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.ToolCalls) != 1 || out.ToolCalls[0].Function.Name != "get_weather" {
+		t.Fatalf("ToolCalls = %+v", out.ToolCalls)
+	}
+	if out.ToolCalls[0].Function.Arguments["city"] != "Tokyo" {
+		t.Errorf("Arguments = %+v", out.ToolCalls[0].Function.Arguments)
+	}
+	if out.StopReason != stopReasonToolUse {
+		t.Errorf("StopReason = %q", out.StopReason)
+	}
+}
+
+// The fallback envelope can also carry a plain answer when the model decides
+// not to call any tool.
+func TestGenerateFallbackPlainAnswer(t *testing.T) {
+	b := mcpAwareStub(t, `
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"StructuredOutput","input":{"content":"It is sunny.","tool_calls":[]}}]}}'`)
+	out, err := b.Generate(context.Background(), toolInput(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.ToolCalls) != 0 {
+		t.Errorf("ToolCalls = %+v", out.ToolCalls)
+	}
+	if out.Text != "It is sunny." {
+		t.Errorf("Text = %q", out.Text)
+	}
+	if out.StopReason != stopReasonEndTurn {
+		t.Errorf("StopReason = %q", out.StopReason)
+	}
+}
+
+// A streaming client gets the fallback's outcome as chunks.
+func TestGenerateFallbackStreamsToolCalls(t *testing.T) {
+	b := mcpAwareStub(t, `
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"StructuredOutput","input":{"content":"","tool_calls":[{"name":"f","arguments":{}}]}}]}}'`)
+	var chunks []core.StreamChunk
+	out, err := b.Generate(context.Background(), toolInput(), func(c core.StreamChunk) error {
+		chunks = append(chunks, c)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls = %+v", out.ToolCalls)
+	}
+	if len(chunks) != 1 || len(chunks[0].ToolCalls) != 1 {
+		t.Errorf("chunks = %+v, want the tool call emitted", chunks)
+	}
+}
+
+// Tools plus a format constraint cannot share the single schema slot, so the
+// combination fails loudly instead of answering without the tools.
+func TestGenerateFallbackRefusesToolsWithFormat(t *testing.T) {
+	b := mcpAwareStub(t, `
+  echo '{"type":"result","subtype":"success","stop_reason":"end_turn"}'`)
+	in := toolInput()
+	in.JSONSchema = `{"type":"object"}`
+	_, err := b.Generate(context.Background(), in, nil)
+	if err == nil {
+		t.Fatal("want an error for tools + format under a blocked MCP server")
+	}
+	if !strings.Contains(err.Error(), "format") {
+		t.Errorf("err = %v, want it to explain the conflict", err)
+	}
+}
+
+// A connected MCP server must not trigger the fallback.
+func TestGenerateNoFallbackWhenMCPIsConnected(t *testing.T) {
+	b := stubBridge(t, `
+echo '{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{"name":"oocla","status":"connected"}]}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"mcp__oocla__get_weather","input":{"city":"Tokyo"}}]}}'
+sleep 5
+`)
+	out, err := b.Generate(context.Background(), toolInput(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.ToolCalls) != 1 || out.ToolCalls[0].Function.Name != "get_weather" {
+		t.Fatalf("ToolCalls = %+v, want the MCP path used as is", out.ToolCalls)
+	}
+}
+
+// With an admin-issued shim name, the MCP check and the prefix stripping both
+// follow the configured name.
+func TestGenerateHonorsCustomShimName(t *testing.T) {
+	b := stubBridge(t, `
+echo '{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{"name":"corp-bridge","status":"connected"}]}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"mcp__corp-bridge__get_weather","input":{"city":"Tokyo"}}]}}'
+sleep 5
+`)
+	b.ShimName = "corp-bridge"
+	out, err := b.Generate(context.Background(), toolInput(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.ToolCalls) != 1 || out.ToolCalls[0].Function.Name != "get_weather" {
+		t.Fatalf("ToolCalls = %+v, want the custom prefix stripped", out.ToolCalls)
+	}
+}
+
+// The default name being absent still triggers the fallback when a custom name
+// was configured but not started.
+func TestGenerateCustomShimNameStillDetectsBlocking(t *testing.T) {
+	b := mcpAwareStub(t, `
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"StructuredOutput","input":{"content":"ok","tool_calls":[]}}]}}'`)
+	b.ShimName = "corp-bridge"
+	out, err := b.Generate(context.Background(), toolInput(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Text != "ok" {
+		t.Errorf("Text = %q, want the fallback answer", out.Text)
+	}
+}
+
+// PromptTools skips the MCP shim entirely: the CLI must never see an MCP
+// config, and tools still round-trip through the prompt fallback.
+func TestGeneratePromptToolsModeSkipsMCP(t *testing.T) {
+	b := stubBridge(t, `
+case "$*" in *--mcp-config*) echo 'mcp config passed' >&2; exit 1 ;; esac
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"StructuredOutput","input":{"content":"","tool_calls":[{"name":"get_weather","arguments":{"city":"Tokyo"}}]}}]}}'
+sleep 5
+`)
+	b.PromptTools = true
+	out, err := b.Generate(context.Background(), toolInput(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.ToolCalls) != 1 || out.ToolCalls[0].Function.Name != "get_weather" {
+		t.Fatalf("ToolCalls = %+v", out.ToolCalls)
+	}
+}
+
+// Without tools the flag changes nothing.
+func TestGeneratePromptToolsModeWithoutTools(t *testing.T) {
+	b := stubBridge(t, `
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}'
+echo '{"type":"result","subtype":"success","stop_reason":"end_turn"}'
+`)
+	b.PromptTools = true
+	out, err := b.Generate(context.Background(), input(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Text != "hi" {
+		t.Errorf("Text = %q", out.Text)
+	}
+}
+
+// Some models answer the fallback by emitting a plain tool_use for the
+// prompted tool instead of filling the structured answer. That is still a
+// valid request for the same call.
+func TestGenerateFallbackAcceptsDirectToolUse(t *testing.T) {
+	b := mcpAwareStub(t, `
+  echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"get_weather","input":{"city":"Tokyo"}}]}}'`)
+	out, err := b.Generate(context.Background(), toolInput(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.ToolCalls) != 1 || out.ToolCalls[0].Function.Name != "get_weather" {
+		t.Fatalf("ToolCalls = %+v", out.ToolCalls)
+	}
+	if out.StopReason != stopReasonToolUse {
+		t.Errorf("StopReason = %q", out.StopReason)
+	}
+}

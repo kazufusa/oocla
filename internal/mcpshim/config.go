@@ -12,17 +12,30 @@ import (
 // which the CLI logs and which has a length limit.
 const ToolsEnv = "OOCLA_TOOLS"
 
-// ToolPrefix is what the CLI prepends to a tool name from this server.
+// ToolPrefix is what the CLI prepends to a tool name from this server under
+// its default name.
 const ToolPrefix = "mcp__" + ServerName + "__"
+
+// Prefix is what the CLI prepends to a tool name from a server named server.
+func Prefix(server string) string { return "mcp__" + server + "__" }
+
+// ValidServerName reports whether server can be used as the shim's MCP server
+// name. The name ends up in tool identifiers and --allowedTools, so the
+// character set stays as narrow as tool names.
+func ValidServerName(server string) bool { return server != "" && validName(server) }
 
 // Config describes the MCP server that exposes tools, as the JSON string for
 // --mcp-config, together with the tool names to pass to --allowedTools.
 //
 // exe is the path to the oocla binary; the shim is oocla itself under a
-// different subcommand, so there is nothing extra to install.
-func Config(exe string, tools []core.Tool) (mcpConfig string, allowed []string, err error) {
+// different subcommand, so there is nothing extra to install. server is the
+// MCP server name to register under, normally ServerName.
+func Config(exe, server string, tools []core.Tool) (mcpConfig string, allowed []string, err error) {
 	if len(tools) == 0 {
 		return "", nil, nil
+	}
+	if !ValidServerName(server) {
+		return "", nil, fmt.Errorf("mcpshim: server name %q may only contain letters, digits, underscore and hyphen", server)
 	}
 	if err := validate(tools); err != nil {
 		return "", nil, err
@@ -33,7 +46,7 @@ func Config(exe string, tools []core.Tool) (mcpConfig string, allowed []string, 
 	}
 	cfg := map[string]any{
 		"mcpServers": map[string]any{
-			ServerName: map[string]any{
+			server: map[string]any{
 				"command": exe,
 				"args":    []string{"mcp-shim"},
 				"env":     map[string]string{ToolsEnv: string(encoded)},
@@ -45,7 +58,7 @@ func Config(exe string, tools []core.Tool) (mcpConfig string, allowed []string, 
 		return "", nil, err
 	}
 	for _, t := range tools {
-		allowed = append(allowed, ToolPrefix+t.Function.Name)
+		allowed = append(allowed, Prefix(server)+t.Function.Name)
 	}
 	return string(raw), allowed, nil
 }

@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,6 +33,12 @@ const stopReasonEndTurn = "end_turn"
 // answer, not a tool call to hand to the API client.
 const structuredOutputTool = "StructuredOutput"
 
+// errMCPBlocked reports that the CLI started without the MCP tool server oocla
+// configured, e.g. under a managed policy that allowlists MCP servers. Without
+// it the model cannot see the request's tools, and the turn would silently
+// come back as prose.
+var errMCPBlocked = errors.New("bridge: the claude CLI started without oocla's MCP tool server; a managed policy may be blocking it")
+
 // Bridge turns one generation request into one claude CLI invocation.
 type Bridge struct {
 	Runner *claudecli.Runner
@@ -43,6 +51,17 @@ type Bridge struct {
 	// context it injects but restricts it to API key authentication. See
 	// claudecli.Options.Bare.
 	Bare bool
+
+	// ShimName overrides the MCP server name the tool shim registers under.
+	// Empty means the default, mcpshim.ServerName. Exists for managed
+	// environments whose admin allowlists MCP servers under an issued name.
+	ShimName string
+
+	// PromptTools skips the MCP shim entirely and always carries tools in the
+	// prompt. For debugging the fallback, and for environments where the shim
+	// is known to be blocked, where it saves the aborted detection call every
+	// tools request would otherwise pay.
+	PromptTools bool
 }
 
 // New returns a Bridge driving the claude binary on PATH.
@@ -58,9 +77,20 @@ func (b *Bridge) exe() (string, error) {
 	return os.Executable()
 }
 
+// shimName returns the MCP server name the tool shim registers under.
+func (b *Bridge) shimName() string {
+	if b.ShimName != "" {
+		return b.ShimName
+	}
+	return mcpshim.ServerName
+}
+
 // Generate runs a single turn and collects the answer. When emit is non-nil the
 // CLI is asked for token-level events and each piece is forwarded as it lands.
 func (b *Bridge) Generate(ctx context.Context, in core.GenerateInput, emit func(core.StreamChunk) error) (core.GenerateOutput, error) {
+	if b.PromptTools && len(in.Tools) > 0 {
+		return b.generateWithPromptTools(ctx, in, emit)
+	}
 	opts := claudecli.Options{
 		Model:        in.Model,
 		SystemPrompt: in.Prompt.System,
@@ -74,7 +104,7 @@ func (b *Bridge) Generate(ctx context.Context, in core.GenerateInput, emit func(
 		if err != nil {
 			return core.GenerateOutput{}, fmt.Errorf("bridge: locating the oocla binary: %w", err)
 		}
-		cfg, allowed, err := mcpshim.Config(exe, in.Tools)
+		cfg, allowed, err := mcpshim.Config(exe, b.shimName(), in.Tools)
 		if err != nil {
 			return core.GenerateOutput{}, err
 		}
@@ -87,11 +117,26 @@ func (b *Bridge) Generate(ctx context.Context, in core.GenerateInput, emit func(
 		return core.GenerateOutput{}, err
 	}
 	defer run.Kill()
-	return collect(run, emit != nil, in, emit)
+	expectServer := ""
+	if len(in.Tools) > 0 {
+		expectServer = b.shimName()
+	}
+	out, err := collect(run, emit != nil, in, emit, expectServer)
+	if errors.Is(err, errMCPBlocked) {
+		// The turn is cut before the model answers, so switching strategies
+		// costs one aborted call, not a wasted answer.
+		run.Stop()
+		slog.Warn("mcp tool server unavailable; folding tools into the prompt",
+			"model", in.Model)
+		return b.generateWithPromptTools(ctx, in, emit)
+	}
+	return out, err
 }
 
-// collect drains one run into an answer.
-func collect(run *claudecli.Run, streaming bool, in core.GenerateInput, emit func(core.StreamChunk) error) (core.GenerateOutput, error) {
+// collect drains one run into an answer. expectServer names the MCP server
+// the turn's tools were configured as, which the init event must then
+// confirm; empty means no tools were configured.
+func collect(run *claudecli.Run, streaming bool, in core.GenerateInput, emit func(core.StreamChunk) error, expectServer string) (core.GenerateOutput, error) {
 	// A JSON Schema changes what a tool call means, and either JSON mode makes
 	// the text unusable until it is complete.
 	structured := in.JSONSchema != ""
@@ -106,8 +151,12 @@ func collect(run *claudecli.Run, streaming bool, in core.GenerateInput, emit fun
 		structural string
 	)
 
+	prefix := mcpshim.ToolPrefix
+	if expectServer != "" {
+		prefix = mcpshim.Prefix(expectServer)
+	}
 	addToolCall := func(tu *claudecli.ToolUse) error {
-		tc, err := toolCall(tu)
+		tc, err := toolCall(tu, prefix)
 		if err != nil {
 			return err
 		}
@@ -128,6 +177,11 @@ events:
 			return core.GenerateOutput{}, err
 		}
 		switch ev.Kind {
+		case claudecli.KindInit:
+			if expectServer != "" && !slices.Contains(ev.MCPServers, expectServer) {
+				return core.GenerateOutput{}, errMCPBlocked
+			}
+
 		// With --include-partial-messages the CLI sends token deltas and, at
 		// the end of each block, the assembled message. Only one of the two may
 		// be counted, or the answer comes out doubled.
@@ -263,8 +317,9 @@ func compact(raw json.RawMessage) string {
 	return buf.String()
 }
 
-// toolCall converts a CLI tool_use block into the neutral shape.
-func toolCall(tu *claudecli.ToolUse) (core.ToolCall, error) {
+// toolCall converts a CLI tool_use block into the neutral shape, stripping
+// the shim's server prefix from the tool name.
+func toolCall(tu *claudecli.ToolUse, prefix string) (core.ToolCall, error) {
 	args := map[string]any{}
 	if len(tu.Input) > 0 {
 		if err := json.Unmarshal(tu.Input, &args); err != nil {
@@ -272,7 +327,7 @@ func toolCall(tu *claudecli.ToolUse) (core.ToolCall, error) {
 		}
 	}
 	return core.ToolCall{Function: core.ToolCallFunction{
-		Name:      strings.TrimPrefix(tu.Name, mcpshim.ToolPrefix),
+		Name:      strings.TrimPrefix(tu.Name, prefix),
 		Arguments: args,
 	}}, nil
 }

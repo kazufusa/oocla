@@ -3,7 +3,7 @@
 [日本語](README.ja.md)
 
 An HTTP server that speaks both the Ollama API and the OpenAI API, backed by
-the `claude` CLI. Clients of either dialect can request models by names like
+the `claude` CLI. Clients of either API can request models by names like
 `opus` / `sonnet` / `haiku`. The name is OpenAI + Ollama + CLAude.
 
 ```
@@ -28,10 +28,10 @@ $ curl localhost:11434/v1/chat/completions -d '{
 
 ## Principles
 
-- Tools are JSON tool definitions only. Claude Code's built-in tools are all disabled
-- Claude Code's default system prompt is disabled. It behaves as a plain LLM
-- No involvement in authentication. Whatever the environment's `claude` CLI is
-  authenticated as is inherited verbatim
+- Tools are Ollama's JSON tool definitions only. Claude Code's built-in tools are all disabled
+- Claude Code's default system prompt is disabled; the model behaves as a plain LLM
+- No involvement in authentication. The environment's `claude` CLI is used with
+  whatever credentials it already has
 - No conversation is ever stored: every turn runs with `--no-session-persistence`
 - Standard library only. No external dependencies
 
@@ -42,7 +42,7 @@ oocla itself is a single binary with no runtime dependencies; Go is not needed.
 
 ### Install
 
-Homebrew, on macOS and Linuxbrew alike:
+Homebrew (macOS or Linux):
 
 ```
 $ brew install kazufusa/tap/oocla
@@ -55,15 +55,15 @@ $ go install github.com/kazufusa/oocla/cmd/oocla@latest
 ```
 
 Or download `oocla_<version>_<os>_<arch>` from the
-[releases](https://github.com/kazufusa/oocla/releases) and unpack it.
+[releases page](https://github.com/kazufusa/oocla/releases) and unpack it.
 
 ```
-$ tar -xzf oocla_1.0.0_linux_amd64.tar.gz
-$ ./oocla_1.0.0_linux_amd64/oocla version
-v1.0.0
+$ tar -xzf oocla_1.1.0_linux_amd64.tar.gz
+$ ./oocla_1.1.0_linux_amd64/oocla version
+v1.1.0
 ```
 
-amd64 and arm64 builds are provided for linux / macOS / Windows.
+amd64 and arm64 builds are provided for Linux / macOS / Windows.
 Verify with `oocla_<version>_checksums.txt`.
 
 ### Build from source
@@ -85,15 +85,15 @@ oocla serve [options]
 | --- | --- | --- |
 | `--addr` | `127.0.0.1:11434` | Address to listen on |
 | `--claude` | `claude` | Path to the `claude` executable |
-| `--bare` | `false` | Removes every injection, but requires API key auth (see below) |
+| `--bare` | `false` | Removes everything the CLI injects, but requires API key auth (see below) |
 
 Stops on `SIGINT` / `SIGTERM`. On shutdown it waits for in-flight requests,
 then removes its scratch working directory.
 
 Every turn runs `claude` with `--no-session-persistence`, so no conversation
-is ever written to disk. In exchange, a multi-turn conversation resends its
-whole history folded into one turn, so input tokens grow with the length of
-the conversation.
+is ever written to disk. In return, a multi-turn conversation resends its
+whole history collapsed into a single turn, so input tokens grow with the
+length of the conversation.
 
 ## Model names
 
@@ -117,7 +117,7 @@ revision.
 | `POST /api/pull` | Succeeds for known models. There is nothing to transfer |
 | `POST /v1/chat/completions` | OpenAI-compatible. SSE supported |
 | `GET /v1/models` `GET /v1/models/{model}` | OpenAI-compatible |
-| `POST /api/embeddings` `/api/embed` `/v1/embeddings` | 501. The `claude` CLI has no embeddings |
+| `POST /api/embeddings` `/api/embed` `/v1/embeddings` | 501. The `claude` CLI has no embedding support |
 | `POST /api/create` `/api/copy` `/api/push`, `DELETE /api/delete` | 400. No local model files exist |
 
 ### Tools
@@ -136,11 +136,32 @@ $ curl localhost:11434/api/chat -d '{
 [{"function":{"name":"get_weather","arguments":{"city":"Tokyo"}}}]
 ```
 
+#### Environments where MCP is unavailable
+
+Where managed settings refuse to start the MCP server, oocla detects it
+before the model answers and switches automatically: tool definitions go
+into the system prompt and `--json-schema` pins the answer shape (see
+`docs/DESIGN.md` for details).
+
+| Option | Description |
+| --- | --- |
+| `--internal-mcp-shim-name` | Register the MCP server under the name your administrator allowlisted for oocla |
+| `--internal-prompt-tools` | Never use MCP; always use the prompt-based mode above (debugging) |
+
+Measured against the real models (`scripts/verify-prompt-tools.sh`, 2026-07):
+
+| Model | Tool call | Declining tools | Answer from result |
+| --- | --- | --- | --- |
+| opus | 5/5 | 2/2 | 3/3 |
+| sonnet | 5/5 | 2/2 | 3/3 |
+| haiku | 5/5 | 2/2 | 3/3 |
+| fable | 5/5 | 2/2 | 3/3 |
+
 ### options
 
-Ollama's `options` configure a local inference runner, and the `claude` CLI has
-almost no matching entry points. Only `stop` is implemented; the rest are
-ignored with a warning log. Nothing is refused.
+Ollama's `options` configure a local inference runner, and most of them have
+no counterpart in the `claude` CLI. Only `stop` is implemented; the rest are
+ignored with a logged warning. Nothing is rejected.
 
 ### think
 
@@ -148,14 +169,14 @@ ignored with a warning log. Nothing is refused.
 | --- | --- |
 | absent / `false` | Thinking is not returned |
 | `true` | Delivered in `message.thinking` |
-| `"low"` `"medium"` `"high"` | Delivered, with the reasoning depth set |
+| `"low"` `"medium"` `"high"` | Delivered, and the reasoning depth is set to the given level |
 
 ## Known limitations
 
-By default the `claude` CLI injects a base prompt plus a `<system-reminder>`
-carrying the logged-in email address and the date, even with an empty system
-prompt (about 170 tokens in total). Claude Code's real agent prompt (thousands
-of tokens) is successfully disabled.
+By default the `claude` CLI injects a short fixed prompt plus a
+`<system-reminder>` carrying the logged-in email address and the date, even
+with an empty system prompt (about 170 tokens in total). Claude Code's full
+agent prompt (thousands of tokens) is successfully disabled.
 
 To remove everything, use `oocla serve --bare`. In that mode the `claude` CLI
 only reads `ANTHROPIC_API_KEY` or an apiKeyHelper, so an OAuth login no longer
@@ -182,8 +203,8 @@ make dist    # builds release artifacts into dist/
 environment.
 
 A release runs when a tag starting with `v` is pushed. CI runs `make check`
-and then publishes the `make dist` artifacts as they are. Running
-`make dist VERSION=v1.0.0` locally produces the same files. Tags containing a
-hyphen, like `v1.0.0-rc1`, become prereleases.
+and then publishes the `make dist` artifacts unchanged. Running
+`make dist VERSION=v1.1.0` locally produces the same files. Tags containing a
+hyphen, like `v1.1.0-rc1`, become prereleases.
 
 Design and measured behaviour live in `docs/DESIGN.md`.
