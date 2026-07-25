@@ -132,6 +132,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	logTokens(r, out)
 
 	msg := oaiMessage{Role: core.RoleAssistant, Content: out.Text, Reasoning: out.Thinking}
 	msg.ToolCalls = toOpenAIToolCalls(out.ToolCalls)
@@ -206,6 +207,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, p core.ChatPlan,
 		return
 	}
 
+	logTokens(r, out)
 	finish := finishFor(out)
 	last := chunk(oaiMessage{}, &finish)
 	if includeUsage {
@@ -220,6 +222,18 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, p core.ChatPlan,
 	}
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
+}
+
+// logTokens records a turn's token usage on the request's log line. A turn
+// cut short by a tool call has a real input count but no final output count,
+// so each side is logged only when it is known.
+func logTokens(r *http.Request, out core.GenerateOutput) {
+	if out.InputTokens > 0 {
+		httpapi.AddAttrs(r, "input_tokens", out.InputTokens)
+	}
+	if out.OutputTokens > 0 {
+		httpapi.AddAttrs(r, "output_tokens", out.OutputTokens)
+	}
 }
 
 func finishFor(out core.GenerateOutput) string {
