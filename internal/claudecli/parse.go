@@ -25,6 +25,11 @@ const (
 	KindThinkingDelta Kind = "thinking_delta"
 	// KindToolUse is an assistant tool call.
 	KindToolUse Kind = "tool_use"
+	// KindMessageDelta closes a message in partial mode and carries the
+	// message's final usage.
+	KindMessageDelta Kind = "message_delta"
+	// KindMessageStop ends a message in partial mode.
+	KindMessageStop Kind = "message_stop"
 	// KindResult ends a turn.
 	KindResult Kind = "result"
 	// KindOther is an event oocla does not interpret, kept for logging.
@@ -72,6 +77,10 @@ type Event struct {
 	// that was configured but is absent here was not started, e.g. blocked by
 	// a managed policy.
 	MCPServers []string
+	// Usage is the usage snapshot an assistant event carries. InputTokens is
+	// the request's real size; OutputTokens is only what had been generated
+	// when the snapshot was taken, so it undercounts.
+	Usage *Usage
 	// Raw is the undecoded line, set for KindOther.
 	Raw json.RawMessage
 }
@@ -162,6 +171,10 @@ type envelope struct {
 			Name     string          `json:"name"`
 			Input    json.RawMessage `json:"input"`
 		} `json:"content"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
 	} `json:"message"`
 
 	// Event carries the Anthropic streaming event when --include-partial-messages
@@ -173,6 +186,10 @@ type envelope struct {
 			Text     string `json:"text"`
 			Thinking string `json:"thinking"`
 		} `json:"delta"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
 	} `json:"event"`
 
 	Result        string  `json:"result"`
@@ -239,34 +256,48 @@ func decodeLine(line []byte) ([]Event, error) {
 	return []Event{{Kind: KindOther, SessionID: env.SessionID, Raw: json.RawMessage(line)}}, nil
 }
 
-// deltaEvent extracts a token-level delta. Block starts and stops, signature
-// deltas and message lifecycle events carry nothing oocla needs, so they fall
+// deltaEvent extracts a token-level delta or a message boundary. Block starts
+// and stops and signature deltas carry nothing oocla needs, so they fall
 // through to KindOther.
 func deltaEvent(env envelope) (Event, bool) {
-	if env.Event.Type != "content_block_delta" {
-		return Event{}, false
-	}
-	switch env.Event.Delta.Type {
-	case "text_delta":
-		return Event{Kind: KindTextDelta, SessionID: env.SessionID, Text: env.Event.Delta.Text}, true
-	case "thinking_delta":
-		return Event{Kind: KindThinkingDelta, SessionID: env.SessionID, Text: env.Event.Delta.Thinking}, true
+	switch env.Event.Type {
+	case "content_block_delta":
+		switch env.Event.Delta.Type {
+		case "text_delta":
+			return Event{Kind: KindTextDelta, SessionID: env.SessionID, Text: env.Event.Delta.Text}, true
+		case "thinking_delta":
+			return Event{Kind: KindThinkingDelta, SessionID: env.SessionID, Text: env.Event.Delta.Thinking}, true
+		}
+	case "message_delta":
+		return Event{Kind: KindMessageDelta, SessionID: env.SessionID, Usage: &Usage{
+			InputTokens:  env.Event.Usage.InputTokens,
+			OutputTokens: env.Event.Usage.OutputTokens,
+		}}, true
+	case "message_stop":
+		return Event{Kind: KindMessageStop, SessionID: env.SessionID}, true
 	}
 	return Event{}, false
 }
 
 func assistantEvents(env envelope) []Event {
+	var usage *Usage
+	if env.Message.Usage.InputTokens > 0 {
+		usage = &Usage{
+			InputTokens:  env.Message.Usage.InputTokens,
+			OutputTokens: env.Message.Usage.OutputTokens,
+		}
+	}
 	out := make([]Event, 0, len(env.Message.Content))
 	for _, b := range env.Message.Content {
 		switch b.Type {
 		case "text":
-			out = append(out, Event{Kind: KindText, SessionID: env.SessionID, Text: b.Text})
+			out = append(out, Event{Kind: KindText, SessionID: env.SessionID, Text: b.Text, Usage: usage})
 		case "thinking":
-			out = append(out, Event{Kind: KindThinking, SessionID: env.SessionID, Text: b.Thinking})
+			out = append(out, Event{Kind: KindThinking, SessionID: env.SessionID, Text: b.Thinking, Usage: usage})
 		case "tool_use":
 			out = append(out, Event{Kind: KindToolUse, SessionID: env.SessionID, ToolUse: &ToolUse{
 				ID: b.ID, Name: b.Name, Input: b.Input,
-			}})
+			}, Usage: usage})
 		}
 	}
 	return out

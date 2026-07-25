@@ -305,6 +305,7 @@ func TestGenerateStructuredOutputBecomesTheAnswer(t *testing.T) {
 	b := stubBridge(t, `
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Here is what I found about Tokyo."}]}}'
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"StructuredOutput","input":{"city":"Tokyo","population":13960000}}]}}'
+echo '{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":124},"delta":{"stop_reason":"tool_use"}}}'
 sleep 5
 `)
 	in := input()
@@ -331,6 +332,7 @@ func TestGenerateStructuredOutputStreamsOnlyTheAnswer(t *testing.T) {
 	b := stubBridge(t, `
 echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me look that up."}}}'
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"StructuredOutput","input":{"ok":true}}]}}'
+echo '{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":124},"delta":{"stop_reason":"tool_use"}}}'
 sleep 5
 `)
 	in := input()
@@ -442,6 +444,7 @@ case "$*" in
   ;;
 *)
 `+fallbackScript+`
+  echo '{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":124},"delta":{"stop_reason":"tool_use"}}}'
   sleep 5
   ;;
 esac`)
@@ -536,6 +539,7 @@ func TestGenerateNoFallbackWhenMCPIsConnected(t *testing.T) {
 	b := stubBridge(t, `
 echo '{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{"name":"oocla","status":"connected"}]}'
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"mcp__oocla__get_weather","input":{"city":"Tokyo"}}]}}'
+echo '{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":124},"delta":{"stop_reason":"tool_use"}}}'
 sleep 5
 `)
 	out, err := b.Generate(context.Background(), toolInput(), nil)
@@ -553,6 +557,7 @@ func TestGenerateHonorsCustomShimName(t *testing.T) {
 	b := stubBridge(t, `
 echo '{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{"name":"corp-bridge","status":"connected"}]}'
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"mcp__corp-bridge__get_weather","input":{"city":"Tokyo"}}]}}'
+echo '{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":124},"delta":{"stop_reason":"tool_use"}}}'
 sleep 5
 `)
 	b.ShimName = "corp-bridge"
@@ -586,6 +591,7 @@ func TestGeneratePromptToolsModeSkipsMCP(t *testing.T) {
 	b := stubBridge(t, `
 case "$*" in *--mcp-config*) echo 'mcp config passed' >&2; exit 1 ;; esac
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"StructuredOutput","input":{"content":"","tool_calls":[{"name":"get_weather","arguments":{"city":"Tokyo"}}]}}]}}'
+echo '{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":124},"delta":{"stop_reason":"tool_use"}}}'
 sleep 5
 `)
 	b.PromptTools = true
@@ -629,5 +635,46 @@ func TestGenerateFallbackAcceptsDirectToolUse(t *testing.T) {
 	}
 	if out.StopReason != stopReasonToolUse {
 		t.Errorf("StopReason = %q", out.StopReason)
+	}
+}
+
+// A turn cut short by a tool call still knows its input size from the
+// assistant event's usage snapshot. The output count in the snapshot is an
+// undercount, so it stays unreported.
+func TestGenerateCutShortTurnReportsInputTokens(t *testing.T) {
+	b := stubBridge(t, `
+echo '{"type":"assistant","message":{"usage":{"input_tokens":433,"output_tokens":4},"content":[{"type":"tool_use","id":"t1","name":"mcp__oocla__get_weather","input":{"city":"Tokyo"}}]}}'
+sleep 5
+`)
+	out, err := b.Generate(context.Background(), input(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.InputTokens != 433 {
+		t.Errorf("InputTokens = %d, want the snapshot's input count", out.InputTokens)
+	}
+	if out.OutputTokens != 0 {
+		t.Errorf("OutputTokens = %d, want the undercounting snapshot withheld", out.OutputTokens)
+	}
+}
+
+// In partial mode the turn is cut at message_delta rather than at tool_use,
+// which is what makes the final output token count available.
+func TestGenerateCutShortTurnGetsFinalOutputTokens(t *testing.T) {
+	b := stubBridge(t, `
+echo '{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{"name":"oocla","status":"connected"}]}'
+echo '{"type":"assistant","message":{"usage":{"input_tokens":433,"output_tokens":4},"content":[{"type":"tool_use","id":"t1","name":"mcp__oocla__get_weather","input":{"city":"Tokyo"}}]}}'
+echo '{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":124},"delta":{"stop_reason":"tool_use"}}}'
+sleep 5
+`)
+	out, err := b.Generate(context.Background(), toolInput(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls = %+v", out.ToolCalls)
+	}
+	if out.InputTokens != 433 || out.OutputTokens != 124 {
+		t.Errorf("tokens = %d/%d, want 433/124", out.InputTokens, out.OutputTokens)
 	}
 }
