@@ -78,3 +78,35 @@ func TestCleanupLeavesExplicitDirectoriesAlone(t *testing.T) {
 		t.Errorf("an explicitly given directory was removed: %v", err)
 	}
 }
+
+func TestManagedAllowedMCPServers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "managed-settings.json")
+	orig := managedSettingsPaths
+	managedSettingsPaths = []string{path}
+	t.Cleanup(func() { managedSettingsPaths = orig })
+
+	// No file at all: no policy found.
+	if _, found := ManagedAllowedMCPServers(); found {
+		t.Error("want no policy when the file is absent")
+	}
+
+	if err := os.WriteFile(path, []byte(`{"allowedMcpServers":[{"serverName":"aaaaa"},{"serverName":"bbbbb"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	names, found := ManagedAllowedMCPServers()
+	if !found {
+		t.Fatal("want the policy to be found")
+	}
+	if len(names) != 2 || names[0] != "aaaaa" || names[1] != "bbbbb" {
+		t.Errorf("names = %v", names)
+	}
+
+	// A policy file without the key is not an MCP allowlist.
+	if err := os.WriteFile(path, []byte(`{"permissions":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := ManagedAllowedMCPServers(); found {
+		t.Error("want no allowlist when the key is absent")
+	}
+}

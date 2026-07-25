@@ -163,3 +163,37 @@ func TestRunnerUsesIsolatedWorkingDirectory(t *testing.T) {
 		t.Errorf("Cleanup did not remove %q", dir)
 	}
 }
+
+// probeStub builds a Runner whose claude prints the given mcp list output.
+func probeStub(t *testing.T, listing string) *Runner {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude")
+	script := "#!/bin/sh\nif [ \"$1\" = mcp ]; then printf '%s\\n' '" + listing + "'; exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &Runner{Bin: path}
+}
+
+func TestProbeMCPNameAllowed(t *testing.T) {
+	r := probeStub(t, "oocla: /usr/bin/oocla mcp-shim - ✓ Connected")
+	ok, err := r.ProbeMCPName(context.Background(), "oocla", "/usr/bin/oocla")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Error("want the listed server to count as allowed")
+	}
+}
+
+func TestProbeMCPNameBlocked(t *testing.T) {
+	r := probeStub(t, "No MCP servers configured. Use `claude mcp add` to add a server.")
+	ok, err := r.ProbeMCPName(context.Background(), "oocla", "/usr/bin/oocla")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("want a stripped server to count as blocked")
+	}
+}

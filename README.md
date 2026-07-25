@@ -58,9 +58,9 @@ Or download `oocla_<version>_<os>_<arch>` from the
 [releases page](https://github.com/kazufusa/oocla/releases) and unpack it.
 
 ```
-$ tar -xzf oocla_1.1.0_linux_amd64.tar.gz
-$ ./oocla_1.1.0_linux_amd64/oocla version
-v1.1.0
+$ tar -xzf oocla_1.2.0_linux_amd64.tar.gz
+$ ./oocla_1.2.0_linux_amd64/oocla version
+v1.2.0
 ```
 
 amd64 and arm64 builds are provided for Linux / macOS / Windows.
@@ -204,7 +204,7 @@ environment.
 
 A release runs when a tag starting with `v` is pushed. CI runs `make check`
 and then publishes the `make dist` artifacts unchanged. Running
-`make dist VERSION=v1.1.0` locally produces the same files. Tags containing a
-hyphen, like `v1.1.0-rc1`, become prereleases.
+`make dist VERSION=v1.2.0` locally produces the same files. Tags containing a
+hyphen, like `v1.2.0-rc1`, become prereleases.
 
 Design and measured behaviour live in `docs/DESIGN.md`.

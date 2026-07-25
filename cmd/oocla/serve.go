@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kazufusa/oocla/internal/bridge"
+	"github.com/kazufusa/oocla/internal/claudecli"
 	"github.com/kazufusa/oocla/internal/core"
 	"github.com/kazufusa/oocla/internal/httpapi"
 	"github.com/kazufusa/oocla/internal/mcpshim"
@@ -24,6 +26,39 @@ const defaultAddr = "127.0.0.1:11434"
 
 // shutdownGrace is how long in-flight requests get to finish on shutdown.
 const shutdownGrace = 20 * time.Second
+
+// probeShim checks once whether the environment lets the MCP tool shim start,
+// and says so if not. Requests do not depend on it: the per-request detection
+// and the prompt fallback work either way.
+func probeShim(ctx context.Context, b *bridge.Bridge) {
+	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ok, err := b.ProbeShim(probeCtx)
+	switch {
+	case err != nil:
+		slog.Warn("could not check the MCP tool server", "error", err)
+	case !ok:
+		msg := "the MCP tool server is blocked in this environment; " +
+			"tool requests will fall back to prompt-based tools " +
+			"(--internal-mcp-shim-name <name> can match an allowlisted name)"
+		if allowed, found := claudecli.ManagedAllowedMCPServers(); found {
+			// A URL-shaped allowlist entry cannot name a stdio server (the
+			// CLI strips such a server no matter what the policy says), so
+			// only names that can actually work are offered.
+			candidates := make([]string, 0, len(allowed))
+			for _, name := range allowed {
+				if mcpshim.ValidServerName(name) {
+					candidates = append(candidates, name)
+				}
+			}
+			if len(candidates) > 0 {
+				slog.Warn(msg, "shim_name_candidates", candidates)
+				return
+			}
+		}
+		slog.Warn(msg)
+	}
+}
 
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
@@ -58,9 +93,17 @@ func serve(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Announce a blocked MCP tool server at startup rather than on the first
+	// tools request. The probe costs nothing (no model call) and runs in the
+	// background so it never delays listening.
+	if !*promptTools {
+		go probeShim(ctx, b)
+	}
+
 	// The two dialects share nothing but the engine: /v1/* is OpenAI's,
 	// everything else is Ollama's.
 	handler := httpapi.SplitPrefix("/v1/", openai.NewServer(eng), ollama.NewServer(eng))
+	handler = httpapi.LogRequests(slog.Default(), handler)
 	httpSrv := &http.Server{Addr: *addr, Handler: handler}
 	errc := make(chan error, 1)
 	go func() {

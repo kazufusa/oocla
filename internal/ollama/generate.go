@@ -109,6 +109,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		writeGeneratorError(w, err)
 		return
 	}
+	logTokens(r, out)
 	writeJSON(w, http.StatusOK, s.generateFinal(model.Name, out, true))
 }
 
@@ -138,6 +139,7 @@ func (s *Server) generateStream(w http.ResponseWriter, r *http.Request, modelNam
 		_ = writeLine(map[string]string{"error": err.Error()})
 		return
 	}
+	logTokens(r, out)
 	_ = writeLine(s.generateFinal(modelName, out, false))
 }
 

@@ -63,6 +63,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeGeneratorError(w, err)
 		return
 	}
+	logTokens(r, out)
 	writeJSON(w, http.StatusOK, s.chatFinal(p.Model.Name, out, true))
 }
 
@@ -95,6 +96,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, p core.ChatP
 		_ = writeLine(map[string]string{"error": err.Error()})
 		return
 	}
+	logTokens(r, out)
 	// The content already went out as chunks; repeating it here would make
 	// clients that concatenate render the answer twice.
 	_ = writeLine(s.chatFinal(p.Model.Name, out, false))
@@ -140,6 +142,18 @@ func ndjsonWriter(w http.ResponseWriter) (func(any) error, bool) {
 		flusher.Flush()
 		return nil
 	}, true
+}
+
+// logTokens records a turn's token usage on the request's log line. A turn
+// cut short by a tool call has a real input count but no final output count,
+// so each side is logged only when it is known.
+func logTokens(r *http.Request, out core.GenerateOutput) {
+	if out.InputTokens > 0 {
+		httpapi.AddAttrs(r, "input_tokens", out.InputTokens)
+	}
+	if out.OutputTokens > 0 {
+		httpapi.AddAttrs(r, "output_tokens", out.OutputTokens)
+	}
 }
 
 // writeGeneratorError turns a backend failure into an Ollama-shaped error.

@@ -120,14 +120,17 @@ func TestDecodePartialMessageDeltas(t *testing.T) {
 			got = append(got, e)
 		}
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d interesting events, want 2: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("got %d interesting events, want 3: %+v", len(got), got)
 	}
 	if got[0].Kind != KindThinkingDelta || got[0].Text != "hmm" {
 		t.Errorf("first = %+v", got[0])
 	}
 	if got[1].Kind != KindTextDelta || got[1].Text != "1\n2" {
 		t.Errorf("second = %+v", got[1])
+	}
+	if got[2].Kind != KindMessageStop {
+		t.Errorf("third = %+v, want the message boundary surfaced", got[2])
 	}
 }
 
@@ -212,5 +215,32 @@ func TestDecodeInitWithoutMCPServersIsEmpty(t *testing.T) {
 	}
 	if len(ev.MCPServers) != 0 {
 		t.Errorf("MCPServers = %v, want empty", ev.MCPServers)
+	}
+}
+
+func TestDecodeAssistantCarriesUsage(t *testing.T) {
+	d := NewDecoder(strings.NewReader(
+		`{"type":"assistant","message":{"usage":{"input_tokens":433,"output_tokens":4},"content":[{"type":"text","text":"hi"}]}}` + "\n"))
+	ev, err := d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Usage == nil || ev.Usage.InputTokens != 433 || ev.Usage.OutputTokens != 4 {
+		t.Errorf("Usage = %+v", ev.Usage)
+	}
+}
+
+func TestDecodeMessageDeltaCarriesFinalUsage(t *testing.T) {
+	d := NewDecoder(strings.NewReader(
+		`{"type":"stream_event","session_id":"s1","event":{"type":"message_delta","usage":{"output_tokens":124},"delta":{"stop_reason":"tool_use"}}}` + "\n"))
+	ev, err := d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Kind != KindMessageDelta {
+		t.Fatalf("Kind = %q", ev.Kind)
+	}
+	if ev.Usage == nil || ev.Usage.OutputTokens != 124 {
+		t.Errorf("Usage = %+v", ev.Usage)
 	}
 }
