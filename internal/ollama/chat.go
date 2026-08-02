@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/kazufusa/oocla/internal/core"
@@ -44,6 +45,22 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// An empty conversation is how clients preload a model before the first
+	// real turn, not a generation request. As with /api/generate's empty
+	// prompt, it is acknowledged as a single unstreamed object.
+	if len(req.Messages) == 0 {
+		model, ok := s.eng.Reg.Lookup(req.Model)
+		if !ok {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", req.Model))
+			return
+		}
+		writeJSON(w, http.StatusOK, ChatChunk{
+			Model: model.Name, CreatedAt: s.eng.Now(),
+			Message: Message{Role: RoleAssistant},
+			Done:    true, DoneReason: loadDoneReason(req.KeepAlive),
+		})
+		return
+	}
 	spec, status, err := s.chatSpec("/api/chat", req)
 	if err != nil {
 		writeError(w, status, err.Error())
@@ -77,7 +94,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, p core.ChatP
 	}
 
 	emit := func(c core.StreamChunk) error {
-		return writeLine(ChatResponse{
+		return writeLine(ChatChunk{
 			Model:     p.Model.Name,
 			CreatedAt: s.eng.Now(),
 			Message: Message{
@@ -144,9 +161,8 @@ func ndjsonWriter(w http.ResponseWriter) (func(any) error, bool) {
 	}, true
 }
 
-// logTokens records a turn's token usage on the request's log line. A turn
-// cut short by a tool call has a real input count but no final output count,
-// so each side is logged only when it is known.
+// logTokens records a turn's token usage on the request's log line. A count
+// the CLI never reported is 0, so each side is logged only when it is known.
 func logTokens(r *http.Request, out core.GenerateOutput) {
 	if out.InputTokens > 0 {
 		httpapi.AddAttrs(r, "input_tokens", out.InputTokens)
