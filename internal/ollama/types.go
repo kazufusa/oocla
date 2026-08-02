@@ -38,7 +38,8 @@ type ChatRequest struct {
 	Options  map[string]any  `json:"options"`
 	Tools    []Tool          `json:"tools"`
 	Think    json.RawMessage `json:"think"`
-	// KeepAlive is accepted and ignored: there is no model to keep resident.
+	// KeepAlive cannot keep anything resident; it only decides whether an
+	// empty conversation is acknowledged as a load or an unload.
 	KeepAlive json.RawMessage `json:"keep_alive"`
 }
 
@@ -46,21 +47,35 @@ type ChatRequest struct {
 // streams unless the client explicitly opts out.
 func (r ChatRequest) Streaming() bool { return r.Stream == nil || *r.Stream }
 
-// ChatResponse is one message of POST /api/chat. Durations are nanoseconds,
-// matching Ollama.
-type ChatResponse struct {
+// ChatChunk is one streamed content message of POST /api/chat, and also the
+// acknowledgement of a load request, which Ollama sends without statistics
+// fields. The statistics belong to the terminator alone.
+type ChatChunk struct {
 	Model      string    `json:"model"`
 	CreatedAt  time.Time `json:"created_at"`
 	Message    Message   `json:"message"`
 	Done       bool      `json:"done"`
 	DoneReason string    `json:"done_reason,omitempty"`
+}
 
-	TotalDuration      int64 `json:"total_duration,omitempty"`
-	LoadDuration       int64 `json:"load_duration,omitempty"`
-	PromptEvalCount    int   `json:"prompt_eval_count,omitempty"`
-	PromptEvalDuration int64 `json:"prompt_eval_duration,omitempty"`
-	EvalCount          int   `json:"eval_count,omitempty"`
-	EvalDuration       int64 `json:"eval_duration,omitempty"`
+// ChatResponse ends POST /api/chat: the non-streaming answer, or the last
+// line of a stream. The statistics are always written, zeros included: on a
+// real Ollama they are never zero, so clients read them without a presence
+// check and a dropped field becomes None-arithmetic on their side. Durations
+// are nanoseconds, matching Ollama.
+type ChatResponse struct {
+	Model      string    `json:"model"`
+	CreatedAt  time.Time `json:"created_at"`
+	Message    Message   `json:"message"`
+	Done       bool      `json:"done"`
+	DoneReason string    `json:"done_reason"`
+
+	TotalDuration      int64 `json:"total_duration"`
+	LoadDuration       int64 `json:"load_duration"`
+	PromptEvalCount    int   `json:"prompt_eval_count"`
+	PromptEvalDuration int64 `json:"prompt_eval_duration"`
+	EvalCount          int   `json:"eval_count"`
+	EvalDuration       int64 `json:"eval_duration"`
 }
 
 // Done reasons reported by Ollama.

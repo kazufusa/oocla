@@ -120,6 +120,11 @@ revision.
 | `POST /api/embeddings` `/api/embed` `/v1/embeddings` | 501. The `claude` CLI has no embedding support |
 | `POST /api/create` `/api/copy` `/api/push`, `DELETE /api/delete` | 400. No local model files exist |
 
+An empty `messages` array on `/api/chat`, like an empty `prompt` on
+`/api/generate`, is Ollama's preload call: it is acknowledged with
+`done_reason: "load"` (`"unload"` with `keep_alive: 0`) without invoking the
+model. There is nothing to actually load.
+
 ### Tools
 
 As with Ollama, the server never executes tools. It returns `tool_calls`; the
@@ -190,6 +195,10 @@ Also unsupported:
 - Any `options` other than `stop`, e.g. `num_predict` `temperature` `seed`
 - Continuation via `context` on `/api/generate`: it is accepted but ignored,
   since no session is ever kept
+
+The final response always carries every statistics field, as clients expect
+from Ollama. `load_duration` and `prompt_eval_duration` are always 0: there
+is no model load or local prompt evaluation to time.
 
 ## Development
 

@@ -118,6 +118,10 @@ oocla serve [オプション]
 | `POST /api/embeddings` `/api/embed` `/v1/embeddings` | 501。`claude` CLI に埋め込み機能がない |
 | `POST /api/create` `/api/copy` `/api/push`, `DELETE /api/delete` | 400。ローカルにモデル実体がない |
 
+`/api/chat` の空の `messages` と `/api/generate` の空の `prompt` は、Ollama の
+流儀どおりプリロード要求として扱い、モデルを呼ばずに `done_reason: "load"`
+(`keep_alive: 0` なら `"unload"`)で応答する。ロードするものは実在しない。
+
 ### ツール
 
 Ollama と同じく、サーバはツールを実行しない。`tool_calls` を返すので、
@@ -186,6 +190,10 @@ Ollama の `options` はローカルの推論ランナーを設定するため�
 - `num_predict` `temperature` `seed` など、`stop` 以外の `options`
 - `/api/generate` の `context` による継続。セッションを残さない方針のため、
   受け取るが無視する
+
+最終レスポンスの統計フィールドは、クライアントが Ollama に期待するとおり常に
+すべて返す。`load_duration` と `prompt_eval_duration` は計測対象が存在しない
+ため常に 0。
 
 ## 開発
 

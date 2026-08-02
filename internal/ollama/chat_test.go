@@ -144,6 +144,47 @@ func TestChatMaxTokensBecomesLength(t *testing.T) {
 	}
 }
 
+// An empty conversation is Ollama's preload call, answered without invoking
+// the backend; keep_alive 0 turns the acknowledgement into an unload.
+func TestChatEmptyMessagesLoadsTheModel(t *testing.T) {
+	gen := &fakeGen{out: core.GenerateOutput{Text: "should not be called"}}
+	h := newChatServer(t, gen)
+
+	w := do(t, h, "POST", "/api/chat", `{"model":"opus","messages":[]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body)
+	}
+	var got ChatChunk
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Done || got.DoneReason != DoneReasonLoad {
+		t.Errorf("acknowledgement = %+v", got)
+	}
+	if got.Message.Role != RoleAssistant || got.Message.Content != "" {
+		t.Errorf("message = %+v", got.Message)
+	}
+	if strings.Contains(w.Body.String(), "eval_count") {
+		t.Errorf("acknowledgement carries statistics: %s", w.Body)
+	}
+	if gen.last.Model != "" {
+		t.Error("the backend was called for an empty conversation")
+	}
+
+	for _, keepAlive := range []string{"0", `"0"`, `"0s"`} {
+		w := do(t, h, "POST", "/api/chat", `{"model":"opus","messages":[],"keep_alive":`+keepAlive+`}`)
+		var got ChatChunk
+		_ = json.Unmarshal(w.Body.Bytes(), &got)
+		if got.DoneReason != DoneReasonUnload {
+			t.Errorf("keep_alive %s: done_reason = %q, want %q", keepAlive, got.DoneReason, DoneReasonUnload)
+		}
+	}
+
+	if w := do(t, h, "POST", "/api/chat", `{"model":"llama3","messages":[]}`); w.Code != http.StatusNotFound {
+		t.Errorf("unknown model: status = %d, want 404", w.Code)
+	}
+}
+
 func TestChatUnknownModelIs404(t *testing.T) {
 	w := do(t, newChatServer(t, &fakeGen{}), "POST", "/api/chat",
 		`{"model":"llama3","stream":false,"messages":[{"role":"user","content":"x"}]}`)
@@ -156,7 +197,6 @@ func TestChatRejectsBadRequests(t *testing.T) {
 	h := newChatServer(t, &fakeGen{})
 	cases := map[string]string{
 		"bad json":     `{`,
-		"no messages":  `{"model":"opus","stream":false,"messages":[]}`,
 		"unknown role": `{"model":"opus","stream":false,"messages":[{"role":"wizard","content":"x"}]}`,
 	}
 	for name, body := range cases {
@@ -275,6 +315,47 @@ func TestChatStreaming(t *testing.T) {
 	}
 	if last.PromptEvalCount != 12 || last.EvalCount != 34 || last.TotalDuration != int64(2*time.Second) {
 		t.Errorf("terminator statistics = %+v", last)
+	}
+}
+
+// Clients (strands among them) read the terminator's statistics without a
+// presence check, so every field must be written even when its value is zero,
+// as on a tool-call turn that never reports an output count.
+func TestChatFinalAlwaysCarriesStatistics(t *testing.T) {
+	gen := &fakeGen{out: core.GenerateOutput{
+		StopReason: "tool_use",
+		ToolCalls:  []ToolCall{{Function: ToolCallFunction{Name: "f", Arguments: map[string]any{}}}},
+	}}
+	w := do(t, newChatServer(t, gen), "POST", "/api/chat",
+		`{"model":"opus","stream":false,"messages":[{"role":"user","content":"x"}]}`)
+	for _, key := range []string{
+		"done_reason", "total_duration", "load_duration", "prompt_eval_count",
+		"prompt_eval_duration", "eval_count", "eval_duration",
+	} {
+		if !strings.Contains(w.Body.String(), `"`+key+`"`) {
+			t.Errorf("terminator lacks %q:\n%s", key, w.Body)
+		}
+	}
+}
+
+// Content chunks carry no statistics fields on a real Ollama; only the
+// terminator does.
+func TestChatStreamChunksCarryNoStatistics(t *testing.T) {
+	gen := &fakeGen{
+		chunks: []core.StreamChunk{{Text: "hi"}},
+		out:    core.GenerateOutput{Text: "hi", StopReason: "end_turn", InputTokens: 1, OutputTokens: 2},
+	}
+	w := do(t, newChatServer(t, gen), "POST", "/api/chat",
+		`{"model":"opus","stream":true,"messages":[{"role":"user","content":"x"}]}`)
+	raw := strings.Split(strings.TrimSpace(w.Body.String()), "\n")
+	if len(raw) != 2 {
+		t.Fatalf("got %d lines, want a chunk and a terminator:\n%s", len(raw), w.Body)
+	}
+	if strings.Contains(raw[0], "eval_count") {
+		t.Errorf("content chunk carries statistics: %s", raw[0])
+	}
+	if !strings.Contains(raw[1], `"eval_count":2`) || !strings.Contains(raw[1], `"load_duration":0`) {
+		t.Errorf("terminator lacks statistics: %s", raw[1])
 	}
 }
 

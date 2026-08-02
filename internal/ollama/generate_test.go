@@ -119,6 +119,38 @@ func TestGenerateEmptyPromptLoadsTheModel(t *testing.T) {
 	if gen.last.Model != "" {
 		t.Error("the backend was called for an empty prompt")
 	}
+
+	unload := do(t, newChatServer(t, gen), "POST", "/api/generate", `{"model":"opus","keep_alive":0}`)
+	var ack GenerateChunk
+	_ = json.Unmarshal(unload.Body.Bytes(), &ack)
+	if ack.DoneReason != DoneReasonUnload {
+		t.Errorf("keep_alive 0: done_reason = %q, want %q", ack.DoneReason, DoneReasonUnload)
+	}
+}
+
+// As on /api/chat, the terminator writes every statistics field even at zero,
+// while chunks and the load acknowledgement carry none, like Ollama's.
+func TestGenerateStatisticsFieldPresence(t *testing.T) {
+	gen := &fakeGen{
+		chunks: []core.StreamChunk{{Text: "hi"}},
+		out:    core.GenerateOutput{Text: "hi", StopReason: "end_turn", OutputTokens: 2},
+	}
+	w := do(t, newChatServer(t, gen), "POST", "/api/generate", `{"model":"opus","prompt":"x"}`)
+	raw := strings.Split(strings.TrimSpace(w.Body.String()), "\n")
+	if len(raw) != 2 {
+		t.Fatalf("got %d lines, want a chunk and a terminator:\n%s", len(raw), w.Body)
+	}
+	if strings.Contains(raw[0], "eval_count") {
+		t.Errorf("content chunk carries statistics: %s", raw[0])
+	}
+	if !strings.Contains(raw[1], `"prompt_eval_count":0`) || !strings.Contains(raw[1], `"prompt_eval_duration":0`) {
+		t.Errorf("terminator lacks statistics: %s", raw[1])
+	}
+
+	load := do(t, newChatServer(t, gen), "POST", "/api/generate", `{"model":"opus"}`)
+	if strings.Contains(load.Body.String(), "eval_count") {
+		t.Errorf("load acknowledgement carries statistics: %s", load.Body)
+	}
 }
 
 func TestGenerateUnknownModelIs404(t *testing.T) {
