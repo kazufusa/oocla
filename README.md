@@ -100,11 +100,14 @@ length of the conversation.
 | Requested name | Value passed to `claude --model` |
 | --- | --- |
 | `opus`, `sonnet`, `haiku`, `fable` | Same name |
-| Any of the above with `:latest` | Same name |
+| Any of the above with `:latest` or its version tag | The bare alias |
 | An exact model id like `claude-haiku-4-5-20251001` | Passed through as is |
 
-Any tag other than `:latest` is a 404: there is no way to serve a pinned
-revision.
+At startup oocla asks the `claude` CLI what each alias resolves to (a
+zero-turn run: no tokens are spent) and advertises the version as the tag,
+e.g. `opus:5` or `haiku:4.5`. `opus` and `opus:latest` keep working, and
+`/api/show` reports the resolved id in `model_info`. Any other tag is a 404:
+the version tag names what the CLI serves today, not a pinned revision.
 
 ## Endpoints
 

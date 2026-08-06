@@ -203,9 +203,11 @@ func TestCatalog(t *testing.T) {
 	if len(tags.Models) == 0 {
 		t.Fatal("no models advertised")
 	}
+	// The tag is ":latest" until the startup probe resolves the real version,
+	// then e.g. ":4.5"; either can win the race with this test.
 	var found bool
 	for _, m := range tags.Models {
-		if m.Name == model+":latest" {
+		if strings.HasPrefix(m.Name, model+":") {
 			found = true
 		}
 		if m.Digest == "" || m.Size == 0 {

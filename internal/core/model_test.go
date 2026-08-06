@@ -74,6 +74,73 @@ func TestListIsStableAndTagged(t *testing.T) {
 	}
 }
 
+func TestParseVersion(t *testing.T) {
+	cases := map[string]string{
+		"claude-opus-5":              "5",
+		"claude-sonnet-5":            "5",
+		"claude-haiku-4-5-20251001":  "4.5",
+		"claude-opus-4-1-20250805":   "4.1",
+		"claude-3-5-sonnet-20241022": "3.5",
+		"claude-opus":                "",
+		"":                           "",
+	}
+	for id, want := range cases {
+		if got := parseVersion(id); got != want {
+			t.Errorf("parseVersion(%q) = %q, want %q", id, got, want)
+		}
+	}
+}
+
+func TestSetResolvedVersionsTheCatalog(t *testing.T) {
+	r := NewRegistry(testTime())
+	r.SetResolved("opus", "claude-opus-5")
+
+	m, ok := r.Lookup("opus")
+	if !ok {
+		t.Fatal("opus vanished after SetResolved")
+	}
+	if m.Name != "opus:5" || m.Version != "5" || m.ResolvedID != "claude-opus-5" {
+		t.Errorf("resolved model = %+v", m)
+	}
+	// The version becomes an accepted tag; latest and the bare alias survive.
+	for _, in := range []string{"opus:5", "opus:latest", "opus", "OPUS:5"} {
+		if _, ok := r.Lookup(in); !ok {
+			t.Errorf("Lookup(%q): not found", in)
+		}
+	}
+	if _, ok := r.Lookup("opus:4"); ok {
+		t.Error("a wrong version tag must not resolve")
+	}
+	// The list advertises the versioned name, in place.
+	if got := r.List(); got[0].Name != "opus:5" {
+		t.Errorf("List()[0].Name = %q, want %q", got[0].Name, "opus:5")
+	}
+	// Other entries are untouched.
+	if m, _ := r.Lookup("sonnet"); m.Name != "sonnet:latest" {
+		t.Errorf("sonnet = %q, want still latest", m.Name)
+	}
+}
+
+func TestSetResolvedIgnoresTheUnusable(t *testing.T) {
+	r := NewRegistry(testTime())
+	r.SetResolved("opus", "weird-id-with-no-version")
+	if m, _ := r.Lookup("opus"); m.Name != "opus:latest" {
+		t.Errorf("an unusable id changed the catalog: %q", m.Name)
+	}
+	r.SetResolved("llama3", "claude-opus-5")
+	if _, ok := r.Lookup("llama3"); ok {
+		t.Error("SetResolved invented a model")
+	}
+}
+
+func TestLookupPassthroughCarriesVersion(t *testing.T) {
+	r := NewRegistry(testTime())
+	m, _ := r.Lookup("claude-haiku-4-5-20251001")
+	if m.Version != "4.5" || m.ResolvedID != "claude-haiku-4-5-20251001" {
+		t.Errorf("passthrough version = %q, resolved = %q", m.Version, m.ResolvedID)
+	}
+}
+
 func TestDigestIsDeterministicPerModel(t *testing.T) {
 	a, _ := NewRegistry(testTime()).Lookup("opus")
 	b, _ := NewRegistry(testTime()).Lookup("opus:latest")

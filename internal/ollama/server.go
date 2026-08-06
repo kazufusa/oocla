@@ -152,17 +152,25 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", name))
 		return
 	}
+	info := map[string]any{
+		"general.architecture":  "claude",
+		"general.basename":      m.CLIName,
+		"general.description":   m.Description,
+		"claude.context_length": m.ContextLength,
+	}
+	// The startup probe fills these in; a request racing it just sees less.
+	if m.Version != "" {
+		info["general.version"] = m.Version
+	}
+	if m.ResolvedID != "" {
+		info["claude.resolved_model"] = m.ResolvedID
+	}
 	writeJSON(w, http.StatusOK, showResponse{
-		Modelfile:  fmt.Sprintf("# oocla\nFROM %s\n", m.CLIName),
-		Parameters: "",
-		Template:   "",
-		Details:    detailsFor(m),
-		ModelInfo: map[string]any{
-			"general.architecture":  "claude",
-			"general.basename":      m.CLIName,
-			"general.description":   m.Description,
-			"claude.context_length": m.ContextLength,
-		},
+		Modelfile:    fmt.Sprintf("# oocla\nFROM %s\n", m.CLIName),
+		Parameters:   "",
+		Template:     "",
+		Details:      detailsFor(m),
+		ModelInfo:    info,
 		Capabilities: m.Capabilities,
 		ModifiedAt:   m.ModifiedAt,
 	})
