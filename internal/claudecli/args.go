@@ -41,6 +41,11 @@ type Options struct {
 	// Partial requests token-level streaming events.
 	Partial bool
 
+	// InitOnly caps the run at zero turns: the CLI announces the session and
+	// exits without ever calling the model. Probes use it to read the init
+	// event, which carries the resolved model id, at no token cost.
+	InitOnly bool
+
 	// Bare asks the CLI for its minimal mode, which is the only way to stop it
 	// injecting a base identity prompt and a context block naming the logged-in
 	// user and today's date.
@@ -111,6 +116,9 @@ func (o Options) Args() ([]string, error) {
 	}
 	if o.Partial {
 		args = append(args, "--include-partial-messages")
+	}
+	if o.InitOnly {
+		args = append(args, "--max-turns", "0")
 	}
 	return args, nil
 }

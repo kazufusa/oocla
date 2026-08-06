@@ -97,6 +97,12 @@ func (b *Bridge) ProbeShim(ctx context.Context) (bool, error) {
 	return b.Runner.ProbeMCPName(ctx, b.shimName(), exe)
 }
 
+// ProbeModel reports the exact model id an alias resolves to. The CLI answers
+// from its own tables before any API call, so the probe costs no tokens.
+func (b *Bridge) ProbeModel(ctx context.Context, model string) (string, error) {
+	return b.Runner.ProbeModel(ctx, model, b.Bare)
+}
+
 // Generate runs a single turn and collects the answer. When emit is non-nil the
 // CLI is asked for token-level events and each piece is forwarded as it lands.
 func (b *Bridge) Generate(ctx context.Context, in core.GenerateInput, emit func(core.StreamChunk) error) (core.GenerateOutput, error) {

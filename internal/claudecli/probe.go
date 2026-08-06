@@ -40,6 +40,35 @@ func (r *Runner) ProbeMCPName(ctx context.Context, name, exe string) (bool, erro
 	return strings.Contains(out.String(), name+":"), nil
 }
 
+// ProbeModel reports the exact model id an alias like "opus" resolves to. The
+// CLI resolves aliases locally and announces the result in the init event, so
+// a zero-turn run reads it without any API call being made.
+func (r *Runner) ProbeModel(ctx context.Context, model string, bare bool) (string, error) {
+	run, err := r.Start(ctx, Options{Model: model, InitOnly: true, Bare: bare}, "x")
+	if err != nil {
+		return "", err
+	}
+	defer run.Stop()
+	for {
+		ev, err := run.Next()
+		if err != nil {
+			// The stream ended without an init event. Reap the process first:
+			// stderr may still be filling, and a non-zero exit is the better
+			// explanation anyway.
+			if closeErr := run.Close(); closeErr != nil {
+				return "", fmt.Errorf("claudecli: probing model %q: %w", model, closeErr)
+			}
+			return "", fmt.Errorf("claudecli: probing model %q: stream ended without an init event", model)
+		}
+		if ev.Kind == KindInit {
+			if ev.Model == "" {
+				return "", fmt.Errorf("claudecli: probing model %q: init event carries no model id", model)
+			}
+			return ev.Model, nil
+		}
+	}
+}
+
 // managedSettingsPaths are where managed policies live on disk. There is no
 // CLI query for the policy itself, so reading the file is the only way to
 // name the allowed servers; missing or unreadable files just mean no answer.

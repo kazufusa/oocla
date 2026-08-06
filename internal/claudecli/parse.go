@@ -73,6 +73,10 @@ type Event struct {
 	Text    string
 	ToolUse *ToolUse
 	Result  *Result
+	// Model is the exact model id the session runs, set for KindInit. The CLI
+	// resolves aliases like "opus" locally, so this is known before any API
+	// call is made.
+	Model string
 	// MCPServers lists the connected MCP servers, set for KindInit. A server
 	// that was configured but is absent here was not started, e.g. blocked by
 	// a managed policy.
@@ -156,6 +160,7 @@ type envelope struct {
 	Type      string `json:"type"`
 	Subtype   string `json:"subtype"`
 	SessionID string `json:"session_id"`
+	Model     string `json:"model"`
 
 	MCPServers []struct {
 		Name   string `json:"name"`
@@ -222,7 +227,7 @@ func decodeLine(line []byte) ([]Event, error) {
 					connected = append(connected, s.Name)
 				}
 			}
-			return []Event{{Kind: KindInit, SessionID: env.SessionID, MCPServers: connected}}, nil
+			return []Event{{Kind: KindInit, SessionID: env.SessionID, MCPServers: connected, Model: env.Model}}, nil
 		}
 	case "assistant":
 		return assistantEvents(env), nil

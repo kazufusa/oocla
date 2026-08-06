@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -12,7 +13,8 @@ import (
 // on disk, so Size and Digest are synthesized deterministically from the name:
 // Ollama clients expect both fields to be present and stable.
 type Model struct {
-	// Name is the Ollama-facing name, always "<base>:<tag>".
+	// Name is the Ollama-facing name, always "<base>:<tag>". The tag is the
+	// model's version once it is known, "latest" until then.
 	Name string
 	// CLIName is what gets passed to `claude --model`.
 	CLIName string
@@ -22,6 +24,12 @@ type Model struct {
 	ContextLength int
 	// Capabilities is the Ollama capability list, e.g. "completion", "tools".
 	Capabilities []string
+
+	// ResolvedID is the exact model id the CLI resolves this entry to, e.g.
+	// "claude-opus-5". Empty until a probe reports it.
+	ResolvedID string
+	// Version is the model version read out of ResolvedID, e.g. "5" or "4.5".
+	Version string
 
 	Size       int64
 	Digest     string
@@ -52,8 +60,11 @@ var aliases = []struct {
 	{"fable", "Claude Fable via the claude CLI", 200000},
 }
 
-// Registry resolves Ollama model names to claude CLI model arguments.
+// Registry resolves Ollama model names to claude CLI model arguments. A
+// startup probe reports the exact model id behind each alias through
+// SetResolved, so reads and that late write are serialized here.
 type Registry struct {
+	mu       sync.RWMutex
 	models   []Model
 	byCLI    map[string]Model
 	modified time.Time
@@ -89,32 +100,82 @@ func newModel(cliName, description string, context int, modified time.Time) Mode
 	}
 }
 
+// SetResolved records the exact model id an alias resolves to, as reported by
+// a probe. The entry's version is read out of the id and becomes its tag, so
+// the catalog advertises "opus:5" instead of "opus:latest". Unknown aliases
+// and ids without a readable version are ignored: the catalog must not get
+// worse because a probe returned something unexpected.
+func (r *Registry) SetResolved(cliName, resolvedID string) {
+	version := parseVersion(resolvedID)
+	if version == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m, ok := r.byCLI[cliName]
+	if !ok {
+		return
+	}
+	m.ResolvedID = resolvedID
+	m.Version = version
+	m.Name = cliName + ":" + version
+	r.byCLI[cliName] = m
+	for i := range r.models {
+		if r.models[i].CLIName == cliName {
+			r.models[i] = m
+		}
+	}
+}
+
 // List returns the advertised catalog in a stable order.
 func (r *Registry) List() []Model {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]Model, len(r.models))
 	copy(out, r.models)
 	return out
 }
 
 // Lookup resolves an Ollama model name. It accepts the bare alias ("opus"),
-// the tagged form ("opus:latest"), and exact Claude model ids
-// ("claude-haiku-4-5-20251001"), case-insensitively. Any other tag than
-// "latest" is rejected: oocla has no way to serve a pinned revision.
+// the tagged forms ("opus:latest", and "opus:5" once the version is known),
+// and exact Claude model ids ("claude-haiku-4-5-20251001"),
+// case-insensitively. Any other tag is rejected: oocla has no way to serve a
+// pinned revision.
 func (r *Registry) Lookup(name string) (Model, bool) {
 	base, tag, ok := splitTag(name)
 	if !ok {
 		return Model{}, false
 	}
-	if tag != defaultTag {
-		return Model{}, false
-	}
-	if m, ok := r.byCLI[base]; ok {
+	r.mu.RLock()
+	m, aliased := r.byCLI[base]
+	r.mu.RUnlock()
+	if aliased {
+		if tag != defaultTag && tag != m.Version {
+			return Model{}, false
+		}
 		return m, true
 	}
-	if isPassthrough(base) {
-		return newModel(base, "Claude model passed through to the claude CLI", 200000, r.modified), true
+	if tag == defaultTag && isPassthrough(base) {
+		m := newModel(base, "Claude model passed through to the claude CLI", 200000, r.modified)
+		m.ResolvedID = base
+		m.Version = parseVersion(base)
+		return m, true
 	}
 	return Model{}, false
+}
+
+// parseVersion reads the version out of a Claude model id: the numeric parts
+// that are not a date, joined with a dot. "claude-opus-5" is "5",
+// "claude-haiku-4-5-20251001" is "4.5". Ids with no such part yield "".
+func parseVersion(id string) string {
+	var parts []string
+	for _, tok := range strings.Split(id, "-") {
+		if tok == "" || len(tok) >= 8 || strings.Trim(tok, "0123456789") != "" {
+			continue
+		}
+		parts = append(parts, tok)
+	}
+	return strings.Join(parts, ".")
 }
 
 // splitTag lowercases name and splits it into base and tag, defaulting the tag

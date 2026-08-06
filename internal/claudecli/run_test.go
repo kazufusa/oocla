@@ -87,6 +87,35 @@ echo '{"type":"result","subtype":"success","session_id":"sess-1","result":"hi","
 	}
 }
 
+func TestProbeModelReadsInit(t *testing.T) {
+	bin := fakeClaude(t, `
+cat >/dev/null
+echo '{"type":"system","subtype":"hook_started","session_id":"sess-1"}'
+echo '{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-opus-5"}'
+echo '{"type":"result","subtype":"success","session_id":"sess-1"}'
+`)
+	r := &Runner{Bin: bin}
+	t.Cleanup(func() { _ = r.Cleanup() })
+
+	got, err := r.ProbeModel(context.Background(), "opus", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "claude-opus-5" {
+		t.Errorf("resolved id = %q, want %q", got, "claude-opus-5")
+	}
+}
+
+func TestProbeModelReportsMissingInit(t *testing.T) {
+	bin := fakeClaude(t, `cat >/dev/null`)
+	r := &Runner{Bin: bin}
+	t.Cleanup(func() { _ = r.Cleanup() })
+
+	if _, err := r.ProbeModel(context.Background(), "opus", false); err == nil {
+		t.Fatal("want an error when the stream ends without an init event")
+	}
+}
+
 func TestStartPassesPromptOnStdin(t *testing.T) {
 	bin := fakeClaude(t, `
 line=$(cat)

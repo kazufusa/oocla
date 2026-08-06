@@ -60,6 +60,27 @@ func probeShim(ctx context.Context, b *bridge.Bridge) {
 	}
 }
 
+// probeModels resolves each advertised alias to its exact model id, so the
+// catalog can carry real versions ("opus:5") instead of bare aliases. The CLI
+// resolves aliases locally in a zero-turn run, so each probe costs a process
+// start but no tokens. Failures leave the ":latest" entry in place.
+func probeModels(ctx context.Context, b *bridge.Bridge, reg *core.Registry) {
+	for _, m := range reg.List() {
+		probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		id, err := b.ProbeModel(probeCtx, m.CLIName)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Warn("could not resolve model version", "model", m.CLIName, "error", err)
+			continue
+		}
+		reg.SetResolved(m.CLIName, id)
+		slog.Info("resolved model", "model", m.CLIName, "id", id)
+	}
+}
+
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	addr := fs.String("addr", defaultAddr, "address to listen on")
@@ -99,6 +120,10 @@ func serve(args []string) error {
 	if !*promptTools {
 		go probeShim(ctx, b)
 	}
+	// Resolve each alias's real version in the background, so the catalog can
+	// advertise "opus:5" instead of "opus:latest". Requests served before the
+	// probe finishes just see the ":latest" names.
+	go probeModels(ctx, b, eng.Reg)
 
 	// The two dialects share nothing but the engine: /v1/* is OpenAI's,
 	// everything else is Ollama's.
