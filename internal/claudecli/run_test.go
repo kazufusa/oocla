@@ -97,7 +97,7 @@ echo '{"type":"result","subtype":"success","session_id":"sess-1"}'
 	r := &Runner{Bin: bin}
 	t.Cleanup(func() { _ = r.Cleanup() })
 
-	got, err := r.ProbeModel(context.Background(), "opus", false)
+	got, err := r.ProbeModel(context.Background(), Options{Model: "opus"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestProbeModelReportsMissingInit(t *testing.T) {
 	r := &Runner{Bin: bin}
 	t.Cleanup(func() { _ = r.Cleanup() })
 
-	if _, err := r.ProbeModel(context.Background(), "opus", false); err == nil {
+	if _, err := r.ProbeModel(context.Background(), Options{Model: "opus"}); err == nil {
 		t.Fatal("want an error when the stream ends without an init event")
 	}
 }

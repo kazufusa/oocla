@@ -2,7 +2,6 @@ package ollama
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -51,7 +50,8 @@ type GenerateChunk struct {
 
 // GenerateResponse ends POST /api/generate. As with ChatResponse, the
 // statistics are always written, zeros included, because clients read them
-// without a presence check.
+// without a presence check, and the chunk is not embedded for the same
+// reason: the tags are the statement of which fields are guaranteed.
 type GenerateResponse struct {
 	Model      string    `json:"model"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -68,44 +68,14 @@ type GenerateResponse struct {
 	EvalDuration       int64 `json:"eval_duration"`
 }
 
-// DoneReasonLoad marks the reply to an empty prompt or an empty conversation,
-// which Ollama treats as a request to load the model rather than to generate
-// anything. With keep_alive 0 the same request means unload instead. Nothing
-// is ever resident here, so both acknowledge a no-op.
-const (
-	DoneReasonLoad   = "load"
-	DoneReasonUnload = "unload"
-)
-
-// loadDoneReason picks the acknowledgement for an empty request: keep_alive 0
-// asks for an unload, anything else for a load. Ollama reads a bare number as
-// seconds and a string as a Go duration.
-func loadDoneReason(keepAlive json.RawMessage) string {
-	var n float64
-	if json.Unmarshal(keepAlive, &n) == nil {
-		if n == 0 {
-			return DoneReasonUnload
-		}
-		return DoneReasonLoad
-	}
-	var s string
-	if json.Unmarshal(keepAlive, &s) == nil {
-		if d, err := time.ParseDuration(s); err == nil && d == 0 {
-			return DoneReasonUnload
-		}
-	}
-	return DoneReasonLoad
-}
-
 func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	var req GenerateRequest
 	if err := httpapi.DecodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	model, ok := s.eng.Reg.Lookup(req.Model)
+	model, ok := s.lookupModel(w, req.Model)
 	if !ok {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", req.Model))
 		return
 	}
 	// An empty prompt is how clients preload a model. There is nothing to load,

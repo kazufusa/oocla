@@ -99,7 +99,7 @@ func TestSetResolvedVersionsTheCatalog(t *testing.T) {
 	if !ok {
 		t.Fatal("opus vanished after SetResolved")
 	}
-	if m.Name != "opus:5" || m.Version != "5" || m.ResolvedID != "claude-opus-5" {
+	if m.Name != "opus:5" || m.Version() != "5" || m.ResolvedID != "claude-opus-5" {
 		t.Errorf("resolved model = %+v", m)
 	}
 	// The version becomes an accepted tag; latest and the bare alias survive.
@@ -136,8 +136,15 @@ func TestSetResolvedIgnoresTheUnusable(t *testing.T) {
 func TestLookupPassthroughCarriesVersion(t *testing.T) {
 	r := NewRegistry(testTime())
 	m, _ := r.Lookup("claude-haiku-4-5-20251001")
-	if m.Version != "4.5" || m.ResolvedID != "claude-haiku-4-5-20251001" {
-		t.Errorf("passthrough version = %q, resolved = %q", m.Version, m.ResolvedID)
+	if m.Version() != "4.5" || m.ResolvedID != "claude-haiku-4-5-20251001" {
+		t.Errorf("passthrough version = %q, resolved = %q", m.Version(), m.ResolvedID)
+	}
+	// The one tag rule applies to passthrough entries too.
+	if _, ok := r.Lookup("claude-haiku-4-5-20251001:4.5"); !ok {
+		t.Error("version tag on a passthrough id should resolve")
+	}
+	if _, ok := r.Lookup("claude-haiku-4-5-20251001:9"); ok {
+		t.Error("wrong version tag on a passthrough id should not resolve")
 	}
 }
 

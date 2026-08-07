@@ -100,7 +100,7 @@ func (b *Bridge) ProbeShim(ctx context.Context) (bool, error) {
 // ProbeModel reports the exact model id an alias resolves to. The CLI answers
 // from its own tables before any API call, so the probe costs no tokens.
 func (b *Bridge) ProbeModel(ctx context.Context, model string) (string, error) {
-	return b.Runner.ProbeModel(ctx, model, b.Bare)
+	return b.Runner.ProbeModel(ctx, claudecli.Options{Model: model, Bare: b.Bare})
 }
 
 // Generate runs a single turn and collects the answer. When emit is non-nil the

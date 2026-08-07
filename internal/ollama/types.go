@@ -63,6 +63,10 @@ type ChatChunk struct {
 // real Ollama they are never zero, so clients read them without a presence
 // check and a dropped field becomes None-arithmetic on their side. Durations
 // are nanoseconds, matching Ollama.
+//
+// Deliberately not ChatChunk plus statistics: embedding would put the chunk's
+// omitempty tags on the terminator, and which fields a client may rely on is
+// exactly what these types exist to state.
 type ChatResponse struct {
 	Model      string    `json:"model"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -78,10 +82,15 @@ type ChatResponse struct {
 	EvalDuration       int64 `json:"eval_duration"`
 }
 
-// Done reasons reported by Ollama.
+// Done reasons reported by Ollama. Load and unload mark the reply to an
+// empty request (no messages, or no prompt), which Ollama treats as a request
+// to load — or with keep_alive 0, unload — the model rather than to generate
+// anything. Nothing is ever resident here, so both acknowledge a no-op.
 const (
 	DoneReasonStop   = "stop"
 	DoneReasonLength = "length"
+	DoneReasonLoad   = "load"
+	DoneReasonUnload = "unload"
 )
 
 // doneReasonFor maps a Claude stop reason onto Ollama's vocabulary.
@@ -92,4 +101,24 @@ func doneReasonFor(stopReason string) string {
 	default:
 		return DoneReasonStop
 	}
+}
+
+// loadDoneReason picks the acknowledgement for an empty request: keep_alive 0
+// asks for an unload, anything else for a load. Ollama reads a bare number as
+// seconds and a string as a Go duration.
+func loadDoneReason(keepAlive json.RawMessage) string {
+	var n float64
+	if json.Unmarshal(keepAlive, &n) == nil {
+		if n == 0 {
+			return DoneReasonUnload
+		}
+		return DoneReasonLoad
+	}
+	var s string
+	if json.Unmarshal(keepAlive, &s) == nil {
+		if d, err := time.ParseDuration(s); err == nil && d == 0 {
+			return DoneReasonUnload
+		}
+	}
+	return DoneReasonLoad
 }

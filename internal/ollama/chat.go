@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 
 	"github.com/kazufusa/oocla/internal/core"
@@ -49,9 +48,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// real turn, not a generation request. As with /api/generate's empty
 	// prompt, it is acknowledged as a single unstreamed object.
 	if len(req.Messages) == 0 {
-		model, ok := s.eng.Reg.Lookup(req.Model)
+		model, ok := s.lookupModel(w, req.Model)
 		if !ok {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", req.Model))
 			return
 		}
 		writeJSON(w, http.StatusOK, ChatChunk{

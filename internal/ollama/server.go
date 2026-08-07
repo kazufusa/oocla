@@ -147,9 +147,8 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "model is required")
 		return
 	}
-	m, ok := s.eng.Reg.Lookup(name)
+	m, ok := s.lookupModel(w, name)
 	if !ok {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", name))
 		return
 	}
 	info := map[string]any{
@@ -159,8 +158,8 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 		"claude.context_length": m.ContextLength,
 	}
 	// The startup probe fills these in; a request racing it just sees less.
-	if m.Version != "" {
-		info["general.version"] = m.Version
+	if v := m.Version(); v != "" {
+		info["general.version"] = v
 	}
 	if m.ResolvedID != "" {
 		info["claude.resolved_model"] = m.ResolvedID
@@ -183,4 +182,15 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // writeError reports a failure in Ollama's flat error shape.
 func writeError(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+// lookupModel resolves a requested model name, reporting the 404 itself when
+// there is no such model. Every handler answers that miss identically, so the
+// wording lives here alone.
+func (s *Server) lookupModel(w http.ResponseWriter, name string) (core.Model, bool) {
+	m, ok := s.eng.Reg.Lookup(name)
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", name))
+	}
+	return m, ok
 }
