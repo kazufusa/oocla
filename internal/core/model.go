@@ -28,13 +28,15 @@ type Model struct {
 	// ResolvedID is the exact model id the CLI resolves this entry to, e.g.
 	// "claude-opus-5". Empty until a probe reports it.
 	ResolvedID string
-	// Version is the model version read out of ResolvedID, e.g. "5" or "4.5".
-	Version string
 
 	Size       int64
 	Digest     string
 	ModifiedAt time.Time
 }
+
+// Version is the model version read out of ResolvedID, e.g. "5" or "4.5".
+// Empty until the entry is resolved.
+func (m Model) Version() string { return parseVersion(m.ResolvedID) }
 
 const (
 	defaultTag = "latest"
@@ -64,9 +66,11 @@ var aliases = []struct {
 // startup probe reports the exact model id behind each alias through
 // SetResolved, so reads and that late write are serialized here.
 type Registry struct {
-	mu       sync.RWMutex
-	models   []Model
-	byCLI    map[string]Model
+	mu     sync.RWMutex
+	models []Model
+	// byCLI indexes models by CLI name. An index, not a copy: entries mutate
+	// when resolved, and one store cannot fall out of step with itself.
+	byCLI    map[string]int
 	modified time.Time
 }
 
@@ -75,13 +79,12 @@ type Registry struct {
 // change on every request.
 func NewRegistry(modified time.Time) *Registry {
 	r := &Registry{
-		byCLI:    make(map[string]Model, len(aliases)),
+		byCLI:    make(map[string]int, len(aliases)),
 		modified: modified.UTC(),
 	}
-	for _, a := range aliases {
-		m := newModel(a.name, a.description, a.context, r.modified)
-		r.models = append(r.models, m)
-		r.byCLI[a.name] = m
+	for i, a := range aliases {
+		r.models = append(r.models, newModel(a.name, a.description, a.context, r.modified))
+		r.byCLI[a.name] = i
 	}
 	return r
 }
@@ -112,19 +115,12 @@ func (r *Registry) SetResolved(cliName, resolvedID string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	m, ok := r.byCLI[cliName]
+	i, ok := r.byCLI[cliName]
 	if !ok {
 		return
 	}
-	m.ResolvedID = resolvedID
-	m.Version = version
-	m.Name = cliName + ":" + version
-	r.byCLI[cliName] = m
-	for i := range r.models {
-		if r.models[i].CLIName == cliName {
-			r.models[i] = m
-		}
-	}
+	r.models[i].ResolvedID = resolvedID
+	r.models[i].Name = cliName + ":" + version
 }
 
 // List returns the advertised catalog in a stable order.
@@ -147,21 +143,25 @@ func (r *Registry) Lookup(name string) (Model, bool) {
 		return Model{}, false
 	}
 	r.mu.RLock()
-	m, aliased := r.byCLI[base]
-	r.mu.RUnlock()
+	i, aliased := r.byCLI[base]
+	var m Model
 	if aliased {
-		if tag != defaultTag && tag != m.Version {
+		m = r.models[i]
+	}
+	r.mu.RUnlock()
+	if !aliased {
+		if !isPassthrough(base) {
 			return Model{}, false
 		}
-		return m, true
-	}
-	if tag == defaultTag && isPassthrough(base) {
-		m := newModel(base, "Claude model passed through to the claude CLI", 200000, r.modified)
+		m = newModel(base, "Claude model passed through to the claude CLI", 200000, r.modified)
 		m.ResolvedID = base
-		m.Version = parseVersion(base)
-		return m, true
 	}
-	return Model{}, false
+	// One rule for every entry: the accepted tags are "latest" and the
+	// entry's version, once it has one.
+	if tag != defaultTag && tag != m.Version() {
+		return Model{}, false
+	}
+	return m, true
 }
 
 // parseVersion reads the version out of a Claude model id: the numeric parts

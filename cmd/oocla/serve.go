@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -28,11 +27,15 @@ const defaultAddr = "127.0.0.1:11434"
 // shutdownGrace is how long in-flight requests get to finish on shutdown.
 const shutdownGrace = 20 * time.Second
 
+// probeTimeout bounds each startup probe: the MCP shim check and the
+// per-alias model resolution.
+const probeTimeout = 30 * time.Second
+
 // probeShim checks once whether the environment lets the MCP tool shim start,
 // and says so if not. Requests do not depend on it: the per-request detection
 // and the prompt fallback work either way.
 func probeShim(ctx context.Context, b *bridge.Bridge) {
-	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	ok, err := b.ProbeShim(probeCtx)
 	switch {
@@ -61,32 +64,29 @@ func probeShim(ctx context.Context, b *bridge.Bridge) {
 	}
 }
 
-// probeModels resolves each advertised alias to its exact model id, so the
-// catalog can carry real versions ("opus:5") instead of bare aliases. The CLI
-// resolves aliases locally in a zero-turn run, so each probe costs a process
-// start but no tokens. The probes run in parallel: until one finishes, its
-// entry answers as ":latest", so the window should be as short as the slowest
-// probe, not the sum. Failures leave the ":latest" entry in place.
+// probeModels resolves each advertised alias to its exact model id in the
+// background, so the catalog can carry real versions ("opus:5") instead of
+// bare aliases. The CLI resolves aliases locally in a zero-turn run, so each
+// probe costs a process start but no tokens. The probes run in parallel:
+// until one finishes, its entry answers as ":latest", so the window is as
+// short as the slowest probe, not the sum. Failures leave the ":latest"
+// entry in place.
 func probeModels(ctx context.Context, b *bridge.Bridge, reg *core.Registry) {
-	var wg sync.WaitGroup
 	for _, m := range reg.List() {
-		wg.Add(1)
-		go func(cliName string) {
-			defer wg.Done()
-			probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		go func() {
+			probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 			defer cancel()
-			id, err := b.ProbeModel(probeCtx, cliName)
+			id, err := b.ProbeModel(probeCtx, m.CLIName)
 			if err != nil {
 				if ctx.Err() == nil {
-					slog.Warn("could not resolve model version", "model", cliName, "error", err)
+					slog.Warn("could not resolve model version", "model", m.CLIName, "error", err)
 				}
 				return
 			}
-			reg.SetResolved(cliName, id)
-			slog.Info("resolved model", "model", cliName, "id", id)
-		}(m.CLIName)
+			reg.SetResolved(m.CLIName, id)
+			slog.Info("resolved model", "model", m.CLIName, "id", id)
+		}()
 	}
-	wg.Wait()
 }
 
 func serve(args []string) error {
@@ -128,10 +128,10 @@ func serve(args []string) error {
 	if !*promptTools {
 		go probeShim(ctx, b)
 	}
-	// Resolve each alias's real version in the background, so the catalog can
-	// advertise "opus:5" instead of "opus:latest". Requests served before the
-	// probe finishes just see the ":latest" names.
-	go probeModels(ctx, b, eng.Reg)
+	// Resolve each alias's real version, so the catalog can advertise
+	// "opus:5" instead of "opus:latest". Requests served before the probes
+	// finish just see the ":latest" names.
+	probeModels(ctx, b, eng.Reg)
 
 	// The two dialects share nothing but the engine: /v1/* is OpenAI's,
 	// everything else is Ollama's.

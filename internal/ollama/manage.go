@@ -48,8 +48,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "model is required")
 		return
 	}
-	if _, ok := s.eng.Reg.Lookup(req.name()); !ok {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", req.name()))
+	if _, ok := s.lookupModel(w, req.name()); !ok {
 		return
 	}
 	if !req.streaming() {

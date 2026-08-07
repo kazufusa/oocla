@@ -40,11 +40,13 @@ func (r *Runner) ProbeMCPName(ctx context.Context, name, exe string) (bool, erro
 	return strings.Contains(out.String(), name+":"), nil
 }
 
-// ProbeModel reports the exact model id an alias like "opus" resolves to. The
-// CLI resolves aliases locally and announces the result in the init event, so
-// a zero-turn run reads it without any API call being made.
-func (r *Runner) ProbeModel(ctx context.Context, model string, bare bool) (string, error) {
-	run, err := r.Start(ctx, Options{Model: model, InitOnly: true, Bare: bare}, "x")
+// ProbeModel reports the exact model id opts.Model resolves to. The CLI
+// resolves aliases like "opus" locally and announces the result in the init
+// event, so a zero-turn run reads it without any API call being made.
+// InitOnly is forced: a probe must never generate.
+func (r *Runner) ProbeModel(ctx context.Context, opts Options) (string, error) {
+	opts.InitOnly = true
+	run, err := r.Start(ctx, opts, "x")
 	if err != nil {
 		return "", err
 	}
@@ -56,13 +58,13 @@ func (r *Runner) ProbeModel(ctx context.Context, model string, bare bool) (strin
 			// stderr may still be filling, and a non-zero exit is the better
 			// explanation anyway.
 			if closeErr := run.Close(); closeErr != nil {
-				return "", fmt.Errorf("claudecli: probing model %q: %w", model, closeErr)
+				return "", fmt.Errorf("claudecli: probing model %q: %w", opts.Model, closeErr)
 			}
-			return "", fmt.Errorf("claudecli: probing model %q: stream ended without an init event", model)
+			return "", fmt.Errorf("claudecli: probing model %q: stream ended without an init event", opts.Model)
 		}
 		if ev.Kind == KindInit {
 			if ev.Model == "" {
-				return "", fmt.Errorf("claudecli: probing model %q: init event carries no model id", model)
+				return "", fmt.Errorf("claudecli: probing model %q: init event carries no model id", opts.Model)
 			}
 			return ev.Model, nil
 		}
