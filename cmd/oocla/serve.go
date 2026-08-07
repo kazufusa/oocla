@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -63,22 +64,29 @@ func probeShim(ctx context.Context, b *bridge.Bridge) {
 // probeModels resolves each advertised alias to its exact model id, so the
 // catalog can carry real versions ("opus:5") instead of bare aliases. The CLI
 // resolves aliases locally in a zero-turn run, so each probe costs a process
-// start but no tokens. Failures leave the ":latest" entry in place.
+// start but no tokens. The probes run in parallel: until one finishes, its
+// entry answers as ":latest", so the window should be as short as the slowest
+// probe, not the sum. Failures leave the ":latest" entry in place.
 func probeModels(ctx context.Context, b *bridge.Bridge, reg *core.Registry) {
+	var wg sync.WaitGroup
 	for _, m := range reg.List() {
-		probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		id, err := b.ProbeModel(probeCtx, m.CLIName)
-		cancel()
-		if err != nil {
-			if ctx.Err() != nil {
+		wg.Add(1)
+		go func(cliName string) {
+			defer wg.Done()
+			probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			id, err := b.ProbeModel(probeCtx, cliName)
+			if err != nil {
+				if ctx.Err() == nil {
+					slog.Warn("could not resolve model version", "model", cliName, "error", err)
+				}
 				return
 			}
-			slog.Warn("could not resolve model version", "model", m.CLIName, "error", err)
-			continue
-		}
-		reg.SetResolved(m.CLIName, id)
-		slog.Info("resolved model", "model", m.CLIName, "id", id)
+			reg.SetResolved(cliName, id)
+			slog.Info("resolved model", "model", cliName, "id", id)
+		}(m.CLIName)
 	}
+	wg.Wait()
 }
 
 func serve(args []string) error {
