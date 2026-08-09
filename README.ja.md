@@ -16,14 +16,14 @@ $ curl localhost:11434/api/chat -d '{
     "stream": false,
     "messages": [{"role": "user", "content": "Capital of Japan?"}]
   }'
-{"model":"haiku:latest","message":{"role":"assistant","content":"Tokyo"},
+{"model":"haiku:4.5","message":{"role":"assistant","content":"Tokyo"},
  "done":true,"done_reason":"stop","prompt_eval_count":170,"eval_count":81}
 
 $ curl localhost:11434/v1/chat/completions -d '{
     "model": "haiku",
     "messages": [{"role": "user", "content": "Capital of Japan?"}]
   }'
-{"id":"chatcmpl-1","object":"chat.completion","model":"haiku:latest",
+{"id":"chatcmpl-1","object":"chat.completion","model":"haiku:4.5",
  "choices":[{"index":0,"message":{"role":"assistant","content":"Tokyo"},"finish_reason":"stop"}], ...}
 ```
 
@@ -34,6 +34,42 @@ $ curl localhost:11434/v1/chat/completions -d '{
 - 認証には関与しない。環境の `claude` CLI の認証をそのまま使う
 - 会話を保存しない。毎ターン `--no-session-persistence` で実行する
 - 標準ライブラリのみ。外部依存を追加しない
+
+## 仕組み
+
+oocla はリクエストを受けるたびに `claude` CLI を 1 プロセス起動し、
+応答を返し終えたら捨てる。常駐するモデルも、保存される会話もない。
+
+```
+クライアント (Ollama API / OpenAI API)
+  │  リクエスト (会話の全履歴 + ツール定義)
+  ▼
+oocla serve
+  │  履歴を 1 つのプロンプトにまとめ、CLI を起動
+  ▼
+claude -p --model haiku --tools "" --system-prompt "" --no-session-persistence ...
+  │  stream-json イベント (本文 / thinking / tool_use / トークン数)
+  ▼
+oocla serve
+  │  イベントを Ollama / OpenAI それぞれの応答形式に変換
+  ▼
+クライアント (ストリーミングまたは一括)
+```
+
+- どちらの API もステートレスで、クライアントは毎回会話の全履歴を送ってくる。
+  oocla はそれを 1 つのターンにまとめて CLI に渡すため、モデルの呼び出しは
+  1 リクエストにつき 1 回で済む。代わりに入力トークンは会話の長さに比例して増える
+- CLI は Claude Code のエージェントとしての機能 (組み込みツール、設定ファイル、
+  skill、システムプロンプト) をすべて無効にして起動する。oocla は CLI を、
+  素の Claude モデルを呼び出す手段としてだけ使う
+- リクエストに tools があるときは、oocla 自身が MCP サーバ (`oocla mcp-shim`) と
+  して CLI の子プロセスになり、ツール定義をモデルに見せる。モデルがツールを
+  呼ぼうとした時点でターンを打ち切り、`tool_calls` としてクライアントに返す。
+  ツールを実行するのはクライアント
+- 起動時に各エイリアスの解決先モデルを CLI に問い合わせ、カタログに
+  バージョンを反映する (「モデル名」の節を参照)
+
+設計判断とその根拠にした実測の記録は `docs/DESIGN.md` にある。
 
 ## 必要なもの
 
@@ -58,9 +94,9 @@ $ go install github.com/kazufusa/oocla/cmd/oocla@latest
 `oocla_<version>_<os>_<arch>` をダウンロードして展開する。
 
 ```
-$ tar -xzf oocla_1.2.0_linux_amd64.tar.gz
-$ ./oocla_1.2.0_linux_amd64/oocla version
-v1.2.0
+$ tar -xzf oocla_1.4.2_linux_amd64.tar.gz
+$ ./oocla_1.4.2_linux_amd64/oocla version
+v1.4.2
 ```
 
 Linux / macOS / Windows の amd64 と arm64 を用意している。
@@ -90,10 +126,6 @@ oocla serve [オプション]
 `SIGINT` / `SIGTERM` で停止する。停止時は実行中のリクエストを待ってから
 作業用の一時ディレクトリを削除する。
 
-毎ターン `--no-session-persistence` で `claude` を実行するので、
-会話がディスクに残ることはない。代わりに、マルチターンの会話は毎回
-全履歴を1つのターンにまとめて送るため、入力トークンが会話の長さに比例して増える。
-
 ## モデル名
 
 | リクエストする名前 | `claude --model` に渡す値 |
@@ -102,12 +134,13 @@ oocla serve [オプション]
 | 上記に `:latest` またはバージョンタグを付けたもの | エイリアス名 |
 | `claude-haiku-4-5-20251001` のようなモデル ID そのもの | そのまま渡す |
 
-起動時に各エイリアスの解決先を `claude` CLI に問い合わせ(ゼロターン実行の
-ためトークン消費なし)、バージョンをタグとして広告する。例: `opus:5`、
-`haiku:4.5`。`opus` や `opus:latest` も引き続き使え、`/api/show` の
+起動時に、各エイリアスが実際にどのモデルへ解決されるかを `claude` CLI に
+問い合わせ、バージョンをタグにして一覧に載せる。例: `opus:5`、`haiku:4.5`。
+問い合わせはモデルを呼ばないゼロターン実行なので、トークンは消費しない。
+`opus` や `opus:latest` という指定も引き続き有効で、`/api/show` の
 `model_info` には解決先のモデル ID が入る。それ以外のタグは 404 になる。
-バージョンタグは「CLI が今日提供するもの」の名前であって、特定リビジョンの
-固定ではない。
+バージョンタグは「CLI がいま提供しているもの」の名前であって、特定
+リビジョンの固定ではない。
 
 ## 対応エンドポイント
 
@@ -145,9 +178,10 @@ $ curl localhost:11434/api/chat -d '{
 
 #### MCP を使えない環境
 
-managed settings が MCP サーバの起動を許可しない環境では、tools 付きリクエストを
-応答前に検出し、ツール定義をシステムプロンプトに埋め込んで `--json-schema` で
-応答の形を固定する方式に自動で切り替わる (詳細は `docs/DESIGN.md`)。
+managed settings が MCP サーバの起動を許可しない環境もある。その場合は
+モデルが応答する前にブロックを検出し、ツール定義をシステムプロンプトに
+埋め込んで `--json-schema` で応答の形を固定する方式に自動で切り替わる
+(詳細は `docs/DESIGN.md`)。
 
 | オプション | 内容 |
 | --- | --- |

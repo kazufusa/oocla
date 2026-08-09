@@ -15,14 +15,14 @@ $ curl localhost:11434/api/chat -d '{
     "stream": false,
     "messages": [{"role": "user", "content": "Capital of Japan?"}]
   }'
-{"model":"haiku:latest","message":{"role":"assistant","content":"Tokyo"},
+{"model":"haiku:4.5","message":{"role":"assistant","content":"Tokyo"},
  "done":true,"done_reason":"stop","prompt_eval_count":170,"eval_count":81}
 
 $ curl localhost:11434/v1/chat/completions -d '{
     "model": "haiku",
     "messages": [{"role": "user", "content": "Capital of Japan?"}]
   }'
-{"id":"chatcmpl-1","object":"chat.completion","model":"haiku:latest",
+{"id":"chatcmpl-1","object":"chat.completion","model":"haiku:4.5",
  "choices":[{"index":0,"message":{"role":"assistant","content":"Tokyo"},"finish_reason":"stop"}], ...}
 ```
 
@@ -34,6 +34,42 @@ $ curl localhost:11434/v1/chat/completions -d '{
   whatever credentials it already has
 - No conversation is ever stored: every turn runs with `--no-session-persistence`
 - Standard library only. No external dependencies
+
+## How it works
+
+oocla starts one `claude` CLI process per request and discards it once the
+response is finished. Nothing stays resident and nothing is stored.
+
+```
+client (Ollama API / OpenAI API)
+  │  request (full conversation history + tool definitions)
+  ▼
+oocla serve
+  │  collapses the history into one prompt, starts the CLI
+  ▼
+claude -p --model haiku --tools "" --system-prompt "" --no-session-persistence ...
+  │  stream-json events (text / thinking / tool_use / token counts)
+  ▼
+oocla serve
+  │  converts the events into the Ollama or OpenAI response shape
+  ▼
+client (streamed or in one piece)
+```
+
+- Both APIs are stateless: the client sends the full history every time.
+  oocla collapses it into a single turn for the CLI, so each request costs
+  one model call — in return, input tokens grow with the conversation length
+- The CLI runs with everything that makes it a coding agent (built-in tools,
+  settings files, skills, the system prompt) disabled. oocla uses it only as
+  a way to call the plain Claude model
+- When a request carries tools, oocla itself becomes the CLI's MCP server
+  (`oocla mcp-shim`, a child process) to present the tool definitions to the
+  model. The moment the model tries to call one, the turn is cut off and
+  returned to the client as `tool_calls`. Executing tools is the client's job
+- At startup, oocla asks the CLI what each alias resolves to and reflects the
+  version in the catalog (see "Model names")
+
+`docs/DESIGN.md` records the design decisions and the measurements behind them.
 
 ## Requirements
 
@@ -58,9 +94,9 @@ Or download `oocla_<version>_<os>_<arch>` from the
 [releases page](https://github.com/kazufusa/oocla/releases) and unpack it.
 
 ```
-$ tar -xzf oocla_1.2.0_linux_amd64.tar.gz
-$ ./oocla_1.2.0_linux_amd64/oocla version
-v1.2.0
+$ tar -xzf oocla_1.4.2_linux_amd64.tar.gz
+$ ./oocla_1.4.2_linux_amd64/oocla version
+v1.4.2
 ```
 
 amd64 and arm64 builds are provided for Linux / macOS / Windows.
@@ -89,11 +125,6 @@ oocla serve [options]
 
 Stops on `SIGINT` / `SIGTERM`. On shutdown it waits for in-flight requests,
 then removes its scratch working directory.
-
-Every turn runs `claude` with `--no-session-persistence`, so no conversation
-is ever written to disk. In return, a multi-turn conversation resends its
-whole history collapsed into a single turn, so input tokens grow with the
-length of the conversation.
 
 ## Model names
 
