@@ -1,11 +1,18 @@
 # oocla
 
+[![ci](https://github.com/kazufusa/oocla/actions/workflows/ci.yml/badge.svg)](https://github.com/kazufusa/oocla/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/kazufusa/oocla)](https://github.com/kazufusa/oocla/releases)
+[![license](https://img.shields.io/github/license/kazufusa/oocla)](LICENSE)
+
 [English](README.md)
 
-Ollama API と OpenAI API の両方に対応した HTTP サーバを立て、バックエンドで
-`claude` CLI を呼ぶ。どちらの API のクライアントからも
-`opus` / `sonnet` / `haiku` といったモデル名でリクエストできる。
-名前は OpenAI + Ollama + CLAude から。
+oocla を使うと、Ollama API / OpenAI API のクライアントから Claude を
+呼び出せます。すべてのリクエストをログイン済みの `claude` CLI 経由で
+処理するので、サブスクリプションでも API キーでも、CLI の認証がそのまま
+効きます。モデルは `opus` / `sonnet` / `haiku` といった名前で
+リクエストできます。名前は OpenAI + Ollama + CLAude に由来します。
+
+![デモ: 左のペインで oocla serve を起動し、右のペインで ollama CLI が Claude から応答を受け取る](docs/demo.gif)
 
 ```
 $ oocla serve
@@ -27,18 +34,26 @@ $ curl localhost:11434/v1/chat/completions -d '{
  "choices":[{"index":0,"message":{"role":"assistant","content":"Tokyo"},"finish_reason":"stop"}], ...}
 ```
 
+## oocla の使いどころ
+
+- チャット UI、エディタ、エージェントフレームワークなど、Ollama API /
+  OpenAI API 対応のツールは既に数多くあります
+- `claude` CLI には、Claude の認証が既に入っています
+- oocla はこの 2 つを繋ぎます。単一バイナリで、何も保存せず、認証情報も
+  管理しません
+
 ## 方針
 
-- ツールは Ollama の JSON tool 定義のみ。Claude Code の組み込みツールはすべて無効にする
-- Claude Code のデフォルトシステムプロンプトも無効にする。素の LLM として振る舞う
-- 認証には関与しない。環境の `claude` CLI の認証をそのまま使う
-- 会話を保存しない。毎ターン `--no-session-persistence` で実行する
-- 標準ライブラリのみ。外部依存を追加しない
+- ツールは Ollama の JSON tool 定義だけを使います。Claude Code の組み込みツールはすべて無効にします
+- Claude Code のデフォルトシステムプロンプトも無効にし、素の LLM として振る舞わせます
+- 認証には関与しません。環境の `claude` CLI の認証をそのまま使います
+- 会話を保存しません。毎ターン `--no-session-persistence` で実行します
+- 標準ライブラリだけで実装し、外部依存を追加しません
 
 ## 仕組み
 
 oocla はリクエストを受けるたびに `claude` CLI を 1 プロセス起動し、
-応答を返し終えたら捨てる。常駐するモデルも、保存される会話もない。
+応答を返し終えたら捨てます。常駐するモデルも、保存される会話もありません。
 
 ```
 クライアント (Ollama API / OpenAI API)
@@ -56,25 +71,25 @@ oocla serve
 クライアント (ストリーミングまたは一括)
 ```
 
-- どちらの API もステートレスで、クライアントは毎回会話の全履歴を送ってくる。
+- どちらの API もステートレスで、クライアントは毎回会話の全履歴を送ってきます。
   oocla はそれを 1 つのターンにまとめて CLI に渡すため、モデルの呼び出しは
-  1 リクエストにつき 1 回で済む。代わりに入力トークンは会話の長さに比例して増える
-- CLI は Claude Code のエージェントとしての機能 (組み込みツール、設定ファイル、
-  skill、システムプロンプト) をすべて無効にして起動する。oocla は CLI を、
-  素の Claude モデルを呼び出す手段としてだけ使う
+  1 リクエストにつき 1 回で済みます。代わりに入力トークンは会話の長さに比例して増えます
+- CLI は Claude Code のエージェント機能 (組み込みツール、設定ファイル、
+  skill、システムプロンプト) をすべて無効にして起動します。oocla は CLI を、
+  素の Claude モデルを呼び出す手段としてだけ使います
 - リクエストに tools があるときは、oocla 自身が MCP サーバ (`oocla mcp-shim`) と
-  して CLI の子プロセスになり、ツール定義をモデルに見せる。モデルがツールを
-  呼ぼうとした時点でターンを打ち切り、`tool_calls` としてクライアントに返す。
-  ツールを実行するのはクライアント
+  して CLI の子プロセスになり、ツール定義をモデルに見せます。モデルがツールを
+  呼ぼうとした時点でターンを打ち切り、`tool_calls` としてクライアントに返します。
+  ツールを実行するのはクライアントです
 - 起動時に各エイリアスの解決先モデルを CLI に問い合わせ、カタログに
-  バージョンを反映する (「モデル名」の節を参照)
+  バージョンを反映します (「モデル名」の節を参照)
 
-設計判断とその根拠にした実測の記録は `docs/DESIGN.md` にある。
+設計判断と、根拠にした実測の記録は `docs/DESIGN.ja.md` にあります。
 
 ## 必要なもの
 
-認証済みの `claude` CLI が PATH にあること。それだけ。
-oocla 自体はランタイム依存なしの単一バイナリで、Go のインストールも要らない。
+必要なのは、認証済みの `claude` CLI が PATH にあることだけです。
+oocla 自体はランタイム依存のない単一バイナリで、Go のインストールも要りません。
 
 ### インストール
 
@@ -91,7 +106,7 @@ $ go install github.com/kazufusa/oocla/cmd/oocla@latest
 ```
 
 もしくは [リリース](https://github.com/kazufusa/oocla/releases) から
-`oocla_<version>_<os>_<arch>` をダウンロードして展開する。
+`oocla_<version>_<os>_<arch>` をダウンロードして展開します。
 
 ```
 $ tar -xzf oocla_1.4.2_linux_amd64.tar.gz
@@ -99,12 +114,12 @@ $ ./oocla_1.4.2_linux_amd64/oocla version
 v1.4.2
 ```
 
-Linux / macOS / Windows の amd64 と arm64 を用意している。
-`oocla_<version>_checksums.txt` で検証できる。
+Linux / macOS / Windows の amd64 と arm64 を用意しています。
+`oocla_<version>_checksums.txt` で検証できます。
 
-### ソースからビルド
+### ソースからのビルド
 
-Go 1.25 以上が必要。
+Go 1.25 以上が必要です。
 
 ```
 $ git clone https://github.com/kazufusa/oocla
@@ -123,8 +138,47 @@ oocla serve [オプション]
 | `--claude` | `claude` | `claude` 実行ファイルのパス |
 | `--bare` | `false` | CLI が自動で差し込むプロンプトを完全に消す。ただし API キー認証が必須になる (後述) |
 
-`SIGINT` / `SIGTERM` で停止する。停止時は実行中のリクエストを待ってから
-作業用の一時ディレクトリを削除する。
+`SIGINT` / `SIGTERM` で停止します。停止時は実行中のリクエストを待ってから、
+作業用の一時ディレクトリを削除します。
+
+### クライアントの例
+
+Python の `ollama` パッケージから:
+
+```python
+from ollama import Client
+
+client = Client(host="http://127.0.0.1:11434")
+res = client.chat(model="haiku",
+                  messages=[{"role": "user", "content": "Capital of Japan?"}])
+print(res["message"]["content"])
+```
+
+OpenAI SDK から:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="unused")
+res = client.chat.completions.create(
+    model="sonnet",
+    messages=[{"role": "user", "content": "Capital of Japan?"}])
+print(res.choices[0].message.content)
+```
+
+このほかのツールも、Ollama か OpenAI 互換サーバに繋がるものなら、
+接続先を `http://127.0.0.1:11434` に向けるだけで使えます。
+
+実サーバで動作を確認したクライアント (2026-08):
+
+| クライアント | バージョン | 確認した内容 |
+| --- | --- | --- |
+| `ollama` CLI | 0.15.0 | ワンショットの `ollama run`。ストリーミングと thinking 表示 |
+| `ollama` (Python) | 0.6.2 | `chat()` |
+| `openai` (Python SDK) | 2.52.0 | `chat.completions.create()` |
+
+冒頭のデモ GIF も実サーバに対して `vhs` で録画したものです
+(`docs/demo.tape`)。
 
 ## モデル名
 
@@ -135,12 +189,12 @@ oocla serve [オプション]
 | `claude-haiku-4-5-20251001` のようなモデル ID そのもの | そのまま渡す |
 
 起動時に、各エイリアスが実際にどのモデルへ解決されるかを `claude` CLI に
-問い合わせ、バージョンをタグにして一覧に載せる。例: `opus:5`、`haiku:4.5`。
-問い合わせはモデルを呼ばないゼロターン実行なので、トークンは消費しない。
-`opus` や `opus:latest` という指定も引き続き有効で、`/api/show` の
-`model_info` には解決先のモデル ID が入る。それ以外のタグは 404 になる。
-バージョンタグは「CLI がいま提供しているもの」の名前であって、特定
-リビジョンの固定ではない。
+問い合わせ、バージョンをタグにして一覧に載せます。例: `opus:5`、`haiku:4.5`。
+問い合わせはモデルを呼ばないゼロターン実行なので、トークンを消費しません。
+`opus` や `opus:latest` という指定もそのまま使えます。`/api/show` の
+`model_info` には解決先のモデル ID が入ります。それ以外のタグは 404 になります。
+バージョンタグは「CLI がいま提供しているもの」の名前であって、
+特定リビジョンの固定ではありません。
 
 ## 対応エンドポイント
 
@@ -157,13 +211,13 @@ oocla serve [オプション]
 | `POST /api/create` `/api/copy` `/api/push`, `DELETE /api/delete` | 400。ローカルにモデル実体がない |
 
 `/api/chat` の空の `messages` と `/api/generate` の空の `prompt` は、Ollama の
-流儀どおりプリロード要求として扱い、モデルを呼ばずに `done_reason: "load"`
-(`keep_alive: 0` なら `"unload"`)で応答する。ロードするものは実在しない。
+流儀どおりプリロード要求として扱います。モデルを呼ばずに `done_reason: "load"`
+(`keep_alive: 0` なら `"unload"`) で応答します。実際にロードするものはありません。
 
 ### ツール
 
-Ollama と同じく、サーバはツールを実行しない。`tool_calls` を返すので、
-クライアントが実行して `role: "tool"` のメッセージで結果を返す。
+Ollama と同じく、サーバはツールを実行しません。`tool_calls` を返すので、
+クライアントが実行して `role: "tool"` のメッセージで結果を返します。
 
 ```
 $ curl localhost:11434/api/chat -d '{
@@ -178,10 +232,10 @@ $ curl localhost:11434/api/chat -d '{
 
 #### MCP を使えない環境
 
-managed settings が MCP サーバの起動を許可しない環境もある。その場合は
-モデルが応答する前にブロックを検出し、ツール定義をシステムプロンプトに
-埋め込んで `--json-schema` で応答の形を固定する方式に自動で切り替わる
-(詳細は `docs/DESIGN.md`)。
+managed settings が MCP サーバの起動を許可しない環境もあります。
+その場合は、モデルが応答する前にブロックを検出して別方式に切り替わります。
+ツール定義をシステムプロンプトに埋め込み、`--json-schema` で応答の形を
+固定する方式です (詳細は `docs/DESIGN.ja.md`)。
 
 | オプション | 内容 |
 | --- | --- |
@@ -199,9 +253,9 @@ managed settings が MCP サーバの起動を許可しない環境もある。�
 
 ### options
 
-Ollama の `options` はローカルの推論ランナーを設定するためのもので、
-`claude` CLI には対応する設定がほとんどない。`stop` だけ実装し、
-残りは無視して警告ログに出す。拒否はしない。
+Ollama の `options` はローカルの推論ランナー向けの設定で、`claude` CLI には
+対応する設定がほとんどありません。`stop` だけを実装し、残りは無視して
+警告ログに出します。拒否はしません。
 
 ### think
 
@@ -213,26 +267,27 @@ Ollama の `options` はローカルの推論ランナーを設定するため�
 
 ## 既知の制約
 
-`claude` CLI は既定で、空のシステムプロンプトを指定しても短い固定プロンプトと、
-ログイン中のメールアドレスと日付を含む `<system-reminder>` を差し込んでくる
-(合わせて170トークン程度)。Claude Code 本来のエージェント用プロンプト
-(数千トークン) は無効化できている。
+`claude` CLI は既定で、空のシステムプロンプトを指定しても短い固定プロンプトを
+差し込みます。加えて、ログイン中のメールアドレスと日付を含む
+`<system-reminder>` も入ります (合わせて 170 トークン程度)。
+Claude Code 本来のエージェント用プロンプト (数千トークン) は無効化できています。
 
-完全に消すには `oocla serve --bare` を使う。ただしこのモードでは `claude` CLI が
-`ANTHROPIC_API_KEY` または apiKeyHelper しか読まなくなり、OAuth ログインでは動かない。
-`--agents` / `--safe-mode` などを実測した結果も含め、詳細は `docs/DESIGN.md`。
+完全に消すには `oocla serve --bare` を使います。ただしこのモードでは
+`claude` CLI が `ANTHROPIC_API_KEY` または apiKeyHelper しか読まなくなり、
+OAuth ログインでは動きません。`--agents` / `--safe-mode` などの実測結果も含め、
+詳細は `docs/DESIGN.ja.md` にあります。
 
-その他、対応しないもの。
+そのほかに対応しないものは次のとおりです。
 
-- 画像入力。`images` フィールドは受け取るが使わない
+- 画像入力。`images` フィールドは受け取りますが使いません
 - 埋め込み
 - `num_predict` `temperature` `seed` など、`stop` 以外の `options`
 - `/api/generate` の `context` による継続。セッションを残さない方針のため、
-  受け取るが無視する
+  受け取っても無視します
 
-最終レスポンスの統計フィールドは、クライアントが Ollama に期待するとおり常に
-すべて返す。`load_duration` と `prompt_eval_duration` は計測対象が存在しない
-ため常に 0。
+最終レスポンスの統計フィールドは、クライアントが Ollama に期待するとおり
+常にすべて返します。`load_duration` と `prompt_eval_duration` は
+計測対象が存在しないため常に 0 です。
 
 ## 開発
 
@@ -242,11 +297,11 @@ make e2e     # 実サーバを立てた適合テスト
 make dist    # dist/ にリリース成果物を作る
 ```
 
-`make e2e` は実際に `claude` を呼ぶので課金が発生する。認証済みの環境が必要。
+`make e2e` は実際に `claude` を呼ぶので課金が発生します。認証済みの環境が必要です。
 
-リリースは `v` で始まるタグを push すると走る。CI が `make check` を通してから
-`make dist` の成果物をそのまま公開する。`make dist VERSION=v1.2.0` をローカルで
-実行すれば同じものが手元にできる。`v1.2.0-rc1` のようにハイフンを含むタグは
-プレリリース扱いになる。
+リリースは `v` で始まるタグを push すると走ります。CI が `make check` を
+通してから、`make dist` の成果物をそのまま公開します。ローカルで
+`make dist VERSION=v1.2.0` を実行すれば、同じものが手元にできます。
+`v1.2.0-rc1` のようにハイフンを含むタグはプレリリース扱いになります。
 
-設計と実測結果は `docs/DESIGN.md`。
+設計と実測結果は `docs/DESIGN.ja.md` にあります。

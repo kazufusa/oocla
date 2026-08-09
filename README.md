@@ -1,10 +1,18 @@
 # oocla
 
+[![ci](https://github.com/kazufusa/oocla/actions/workflows/ci.yml/badge.svg)](https://github.com/kazufusa/oocla/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/kazufusa/oocla)](https://github.com/kazufusa/oocla/releases)
+[![license](https://img.shields.io/github/license/kazufusa/oocla)](LICENSE)
+
 [日本語](README.ja.md)
 
-An HTTP server that speaks both the Ollama API and the OpenAI API, backed by
-the `claude` CLI. Clients of either API can request models by names like
-`opus` / `sonnet` / `haiku`. The name is OpenAI + Ollama + CLAude.
+Use Claude from any Ollama or OpenAI client. oocla is an HTTP server that
+speaks both the Ollama API and the OpenAI API and runs every request through
+the `claude` CLI — whatever login the CLI already has, subscription or API
+key, just works. Request models by names like `opus` / `sonnet` / `haiku`.
+The name is OpenAI + Ollama + CLAude.
+
+![Demo: oocla serve in the left pane; in the right pane the ollama CLI gets an answer from Claude](docs/demo.gif)
 
 ```
 $ oocla serve
@@ -25,6 +33,14 @@ $ curl localhost:11434/v1/chat/completions -d '{
 {"id":"chatcmpl-1","object":"chat.completion","model":"haiku:4.5",
  "choices":[{"index":0,"message":{"role":"assistant","content":"Tokyo"},"finish_reason":"stop"}], ...}
 ```
+
+## Why oocla
+
+- The tools you already use — chat UIs, editors, agent frameworks — speak
+  the Ollama API or the OpenAI API
+- The `claude` CLI already holds your Claude login
+- oocla connects the two: a single binary that stores nothing and manages no
+  credentials
 
 ## Principles
 
@@ -125,6 +141,45 @@ oocla serve [options]
 
 Stops on `SIGINT` / `SIGTERM`. On shutdown it waits for in-flight requests,
 then removes its scratch working directory.
+
+### Client examples
+
+With the `ollama` Python package:
+
+```python
+from ollama import Client
+
+client = Client(host="http://127.0.0.1:11434")
+res = client.chat(model="haiku",
+                  messages=[{"role": "user", "content": "Capital of Japan?"}])
+print(res["message"]["content"])
+```
+
+With the OpenAI SDK:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="unused")
+res = client.chat.completions.create(
+    model="sonnet",
+    messages=[{"role": "user", "content": "Capital of Japan?"}])
+print(res.choices[0].message.content)
+```
+
+Anything else that talks to Ollama or to an OpenAI-compatible server can be
+pointed at `http://127.0.0.1:11434` the same way.
+
+Clients verified against a real server (2026-08):
+
+| Client | Version | Verified |
+| --- | --- | --- |
+| `ollama` CLI | 0.15.0 | One-shot `ollama run`, streamed output, thinking display |
+| `ollama` (Python) | 0.6.2 | `chat()` |
+| `openai` (Python SDK) | 2.52.0 | `chat.completions.create()` |
+
+The demo GIF above was recorded against a real server with `vhs`
+(`docs/demo.tape`).
 
 ## Model names
 
@@ -251,3 +306,7 @@ and then publishes the `make dist` artifacts unchanged. Running
 hyphen, like `v1.2.0-rc1`, become prereleases.
 
 Design and measured behaviour live in `docs/DESIGN.md`.
+
+## License
+
+MIT

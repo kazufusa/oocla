@@ -1,64 +1,69 @@
-# oocla 設計
+# oocla design
 
-Ollama API と OpenAI API の両方に対応した HTTP サーバを立て、バックエンドとして
-`claude` CLI を呼ぶ。Ollama クライアントには Ollama そのものに、OpenAI
-クライアントには OpenAI 互換サーバに見えることを目標にする。
+[日本語](DESIGN.ja.md)
 
-## 目標と非目標
+An HTTP server that speaks both the Ollama API and the OpenAI API, backed by
+the `claude` CLI. The goal is to look like Ollama itself to Ollama clients,
+and like an OpenAI-compatible server to OpenAI clients.
 
-目標
+## Goals and non-goals
 
-- `http://localhost:11434` に対して Ollama クライアントがそのまま繋がる
-- `/v1/chat/completions` `/v1/models` で OpenAI クライアントもそのまま繋がる
-- モデル名 `opus` / `sonnet` / `haiku` などでリクエストできる
-- ツールは Ollama の JSON tool 定義のみ。Claude Code 組み込みツールはすべて無効にする
-- Claude Code のデフォルトシステムプロンプトも無効にする。素の LLM として振る舞う
+Goals
 
-非目標
+- Ollama clients connect to `http://localhost:11434` unchanged
+- OpenAI clients connect unchanged too, via `/v1/chat/completions` and `/v1/models`
+- Models can be requested by names like `opus` / `sonnet` / `haiku`
+- Tools are Ollama's JSON tool definitions only; all Claude Code built-in tools are disabled
+- Claude Code's default system prompt is disabled as well; the model behaves as a plain LLM
 
-- 認証。`claude` CLI の認証をそのまま使う。oocla は
-  API キーも OAuth も一切扱わないし、認証系のフラグも渡さない
-- 会話の保存。毎ターン `--no-session-persistence` で実行し、ディスクには
-  何も残さない (後述)
-- 埋め込み (`/api/embeddings`)。`claude` CLI に相当機能がないため 501 を返す
-- モデルの pull / push / delete。ローカルにモデル実体は存在しない
+Non-goals
 
-## 実測した CLI の挙動
+- Authentication. The `claude` CLI's own credentials are used as-is. oocla
+  handles neither API keys nor OAuth, and passes no auth-related flags
+- Conversation storage. Every turn runs with `--no-session-persistence` and
+  leaves nothing on disk (see below)
+- Embeddings (`/api/embeddings`). The `claude` CLI has no equivalent, so 501
+- Model pull / push / delete. No local model files exist
 
-`claude` 2.1.217 で確認した事実。実装の前提はここに書いてあるものだけ。
+## Measured CLI behaviour
 
-| 要件 | 手段 | 確認結果 |
+Facts confirmed with `claude` 2.1.217. The implementation assumes nothing
+beyond what is written here.
+
+| Requirement | Mechanism | Confirmed result |
 | --- | --- | --- |
-| 組み込みツールをすべて無効化 | `--tools ""` | init イベントの `tools` が `[]` になる |
-| デフォルトプロンプト無効 | `--system-prompt <s>` | 置換される。空プロンプトでも `input_tokens` は 180 程度 |
-| 設定ファイル無視 | `--setting-sources ""` | CLAUDE.md / settings.json を読まない |
-| skill 無効 | `--disable-slash-commands` | init の `slash_commands` が `[]` |
-| MCP 限定 | `--strict-mcp-config --mcp-config <json>` | 指定した MCP サーバのみ |
-| 構造化出力 | `--json-schema <schema>` | Ollama の `format` に対応づける |
-| ストリーム | `--output-format stream-json --verbose` | NDJSON でイベントが流れる |
-| トークンの逐次出力 | `--include-partial-messages` | 部分チャンクが流れる |
-| エイリアスの解決先 | `--max-turns 0` | API を呼ばず、init イベントに解決済みモデル ID が載って終了する |
+| Disable all built-in tools | `--tools ""` | `tools` in the init event becomes `[]` |
+| Disable the default prompt | `--system-prompt <s>` | Replaced. About 180 `input_tokens` even for an empty prompt |
+| Ignore settings files | `--setting-sources ""` | CLAUDE.md / settings.json are not read |
+| Disable skills | `--disable-slash-commands` | `slash_commands` in init is `[]` |
+| Restrict MCP | `--strict-mcp-config --mcp-config <json>` | Only the specified MCP servers |
+| Structured output | `--json-schema <schema>` | Mapped to Ollama's `format` |
+| Streaming | `--output-format stream-json --verbose` | Events flow as NDJSON |
+| Token-by-token output | `--include-partial-messages` | Partial chunks flow |
+| Alias resolution | `--max-turns 0` | Exits without calling the API; the init event carries the resolved model id |
 
-`--bare` は使わない。認証が `ANTHROPIC_API_KEY` / apiKeyHelper に限定されてしまい、
-OAuth 認証の環境で動かなくなるため。実測では `--bare` なしで
-`apiKeySource: "none"` のまま正常応答した。
+`--bare` is not used: it restricts authentication to `ANTHROPIC_API_KEY` /
+apiKeyHelper and breaks OAuth environments. Measurements showed normal
+responses without `--bare` even with `apiKeySource: "none"`.
 
-### 空のシステムプロンプト
+### Empty system prompt
 
-Ollama のリクエストに system メッセージがない場合でも `--system-prompt ""` を必ず渡す。
-空文字は「未指定」ではなく「空のシステムプロンプト」として扱われ、デフォルトが消える。
+Even when the Ollama request has no system message, `--system-prompt ""` is
+always passed. The CLI treats the empty string as "an empty system prompt"
+rather than "unspecified", which removes the default.
 
-| 指定 | `input_tokens` |
+| Given | `input_tokens` |
 | --- | --- |
 | `--system-prompt ""` | 170 |
 | `--system-prompt "You are a helpful assistant."` | 176 |
 
-170 トークンが CLI のオーバーヘッドの下限。Claude Code 本来のエージェント用
-システムプロンプト (数千トークン) は載っていない。
+170 tokens is the lower bound of the CLI's overhead. Claude Code's full agent
+system prompt (thousands of tokens) is not present.
 
-### 消しきれない自動挿入 (既知の制約)
+### Auto-injected content that cannot be removed (known limitation)
 
-`--system-prompt ""` でも以下がリクエストに残る。モデル自身に復唱させて確認した。
+Even with `--system-prompt ""`, the following stays in the request. Confirmed
+by having the model repeat it back.
 
 ```
 You are a Claude agent, built on Anthropic's Claude Agent SDK.
@@ -66,338 +71,373 @@ You are a Claude agent, built on Anthropic's Claude Agent SDK.
 <system-reminder>
 As you answer the user's questions, you can use the following context:
 # userEmail
-The user's email address is <ログイン中のメールアドレス>
+The user's email address is <logged-in email address>
 # currentDate
-Today's date is <日付>
+Today's date is <date>
 ...
 </system-reminder>
 ```
 
-つまり素の LLM ではなく「最小構成の Claude エージェント」になる。加えて
-ログイン中のメールアドレスと日付が毎リクエストに載る。
+So the model is not a plain LLM but a "minimal Claude agent". In addition,
+the logged-in email address and the date ride along on every request.
 
-試した手段と結果。
+Attempts and their results:
 
-| 手段 | 結果 |
+| Attempt | Result |
 | --- | --- |
-| `--system-prompt ""` | 固定プロンプトと system-reminder が残る |
-| `--agents` + `--agent` | 固定プロンプトの後ろに連結されるだけ。残る |
-| `--safe-mode` | `input_tokens` が同一 (184)。変化なし |
-| `--exclude-dynamic-system-prompt-sections` | 同上。`--system-prompt` 併用時は無視される |
-| `--bare` / `CLAUDE_CODE_SIMPLE=1` | 消える。ただし後述の代償あり |
+| `--system-prompt ""` | The fixed prompt and the system-reminder remain |
+| `--agents` + `--agent` | Only appended after the fixed prompt. Remains |
+| `--safe-mode` | Identical `input_tokens` (184). No change |
+| `--exclude-dynamic-system-prompt-sections` | Same. Ignored when `--system-prompt` is present |
+| `--bare` / `CLAUDE_CODE_SIMPLE=1` | Gone, at the cost described below |
 
-`--bare` だけが実際に消せる。ただし認証が `ANTHROPIC_API_KEY` / apiKeyHelper に
-限定され、OAuth ログインの環境では `Not logged in · Please run /login` で失敗する。
+Only `--bare` actually removes it. But it restricts authentication to
+`ANTHROPIC_API_KEY` / apiKeyHelper, and OAuth environments fail with
+`Not logged in · Please run /login`.
 
-既定では使わない。`oocla serve --bare` で明示的に選んだときだけ有効になる。
-このモードでも oocla は認証を扱わない。フラグを渡すだけで、認証の可否は CLI 側の
-規則に従う。API キーを使っている環境なら、これで自動挿入は完全に消える。
+It is off by default and takes effect only when chosen explicitly with
+`oocla serve --bare`. Even in this mode oocla stays out of authentication: it
+only passes the flag, and the CLI's own rules decide whether auth succeeds.
+In API-key environments this removes the injected content completely.
 
-### 作業ディレクトリ
+### Working directory
 
-CLI は cwd にある CLAUDE.md やプロジェクトメモリを読み込む。oocla を起動した
-ディレクトリでそのまま CLI を実行するとそれらが会話に混入するため、
-専用の空ディレクトリを作ってそこで実行する。
+The CLI reads CLAUDE.md and project memory from the cwd. Running it in the
+directory where oocla was started would leak those into the conversation, so
+a dedicated empty directory is created and used instead.
 
-### stream-json 入力の挙動
+### stream-json input behaviour
 
-`--input-format stream-json` に `{"type":"assistant",...}` の行を流し込むと、
-履歴として効く。ただし `{"type":"user",...}` の行ごとに1ターン走り、
-`result` イベントが行数分発生する。つまり履歴を毎回リプレイすると
-API 呼び出しが履歴長に比例して増える。
+Feeding `{"type":"assistant",...}` lines into `--input-format stream-json`
+does work as history. But every `{"type":"user",...}` line runs one turn, and
+a `result` event fires per line. Replaying the history each time therefore
+multiplies API calls by the history length.
 
-## アーキテクチャ
+## Architecture
 
 ```
-oocla (単一バイナリ)
-├── serve      : Ollama / OpenAI 互換 HTTP サーバ (:11434)
-├── mcp-shim   : リクエストの tools を MCP ツールとして公開する子プロセス
+oocla (single binary)
+├── serve      : Ollama / OpenAI-compatible HTTP server (:11434)
+├── mcp-shim   : child process exposing the request's tools as MCP tools
 └── version
 ```
 
-### パッケージ構成
+### Package layout
 
-Ollama API と OpenAI API はスキーマに重なりがない。パスも `/api/*` と `/v1/*` で
-完全に分かれる。そこで API ごとの実装を別パッケージに分け、共通の処理系を
-その下に置く。二つの API 実装は互いに依存しない。
+The Ollama and OpenAI APIs share no schema, and their paths split cleanly
+into `/api/*` and `/v1/*`. So each API gets its own package, with the shared
+machinery below them. The two API implementations do not depend on each other.
 
 ```
-cmd/oocla         二つの実装を束ねる。/v1/ 配下 → openai、それ以外 → ollama
-internal/ollama   Ollama API の実装。/api/* の入出力 JSON の型とパース・エンコードだけ
-internal/openai   OpenAI API の実装。/v1/* の入出力 JSON の型とパース・エンコードだけ
-internal/core     どちらの API にも依存しない中核。会話モデル (Message / Tool)、
-                  モデルカタログ、履歴を1ターンにまとめる処理、stop 処理、Engine (実行)
-internal/httpapi  小さな HTTP ルータ (405 と Allow を返す) と JSON ヘルパ
-internal/bridge   core.Generator の実装。claude CLI を1回呼ぶ
+cmd/oocla         Ties the two together. /v1/ → openai, everything else → ollama
+internal/ollama   The Ollama API. Only the /api/* request/response JSON types plus parsing/encoding
+internal/openai   The OpenAI API. Only the /v1/* request/response JSON types plus parsing/encoding
+internal/core     The core, independent of both APIs: conversation model (Message / Tool),
+                  model catalog, history collapsing, stop handling, Engine (execution)
+internal/httpapi  A small HTTP router (405 with Allow) and JSON helpers
+internal/bridge   The core.Generator implementation. Calls the claude CLI once
 ```
 
-不変条件 (いずれも `internal/core/boundary_test.go` で固定)。
+Invariants (all pinned by `internal/core/boundary_test.go`):
 
-- `internal/openai` と `internal/ollama` は相互に import しない
-- この2つを import してよいのは `cmd/oocla` だけ。bridge / mcpshim /
-  claudecli / httpapi は core の型だけに依存する
-- どちらの API 実装も、自前の入出力の型を `core` の中間表現 (`core.ChatSpec`) に
-  変換して `core.Engine` に渡す。一方の API の型を他方の変換経路に使うことはない
-- エラーの形は API ごと。`/v1/*` は 404 / 405 も OpenAI の入れ子形式で返す
-- `core.Message` の JSON タグは Ollama の入出力 JSON 形式そのもの。Ollama の形式が
-  中間表現と 1:1 なので、Ollama 側はこれを直接使い、OpenAI 側は変換する。
-  `core.Tool` は OpenAI 由来の形を Ollama がそのまま採用したので、両 API 共通
+- `internal/openai` and `internal/ollama` never import each other
+- Only `cmd/oocla` may import those two. bridge / mcpshim / claudecli /
+  httpapi depend on core types only
+- Each API implementation converts its own request/response types into the
+  core intermediate representation (`core.ChatSpec`) and hands that to
+  `core.Engine`. One API's types never ride the other's conversion path
+- Error shapes are decided per API. `/v1/*` returns even 404 / 405 in
+  OpenAI's nested format
+- `core.Message`'s JSON tags are exactly Ollama's request/response JSON.
+  Ollama's format maps 1:1 to the intermediate representation, so the Ollama
+  side uses it directly and the OpenAI side converts. `core.Tool` is shared
+  by both APIs, because Ollama adopted OpenAI's shape as-is
 
 ```
 Ollama client
-   │  POST /api/chat  (messages 全履歴 + tools)
+   │  POST /api/chat  (full messages history + tools)
    ▼
 oocla serve
-   │  履歴を1つの user ターンにまとめる (API 呼び出しは1回)
+   │  collapses the history into one user turn (one API call)
    ▼
 claude -p --model haiku --tools "" --system-prompt ... --no-session-persistence
    │
-   └── (tools 指定時) --strict-mcp-config --mcp-config → oocla mcp-shim
+   └── (with tools) --strict-mcp-config --mcp-config → oocla mcp-shim
 ```
 
-### セッションを持たない
+### No sessions
 
-毎ターン `--no-session-persistence` で実行する。`claude` CLI はディスクに
-何も残さず、oocla も会話について何も覚えない。
+Every turn runs with `--no-session-persistence`. The `claude` CLI leaves
+nothing on disk, and oocla remembers nothing about the conversation.
 
-どちらの API もステートレスで、クライアントは毎回全履歴を送ってくる。
-oocla はそれを毎回1つの user ターンにまとめて送る。したがって入力トークンは
-会話の長さに比例して増える。これは「何も残さない」ことの対価として受け入れる。
+Both APIs are stateless: the client sends the full history every time. oocla
+collapses it into a single user turn per request, so input tokens grow with
+the conversation length. That is the accepted price of keeping nothing.
 
-### ツール
+### Tools
 
-Ollama のツール呼び出しはサーバ側では実行しない。サーバは `tool_calls` を返し、
-クライアントが実行して結果を `role: "tool"` のメッセージで送り返す。
+Ollama tool calls are never executed server-side. The server returns
+`tool_calls`; the client executes them and sends the results back as
+`role: "tool"` messages.
 
-これを `claude` CLI で実現するため、リクエストの `tools` を MCP ツールとして
-`oocla mcp-shim` に公開する。shim は oocla 自身のサブコマンドなので追加の
-インストールは要らない。ツール定義は環境変数 `OOCLA_TOOLS` で渡す。
+To make the `claude` CLI do this, the request's `tools` are exposed as MCP
+tools through `oocla mcp-shim`. The shim is a subcommand of oocla itself, so
+nothing extra needs to be installed. Tool definitions are passed through the
+`OOCLA_TOOLS` environment variable.
 
-ツールは実行しない。モデルが `tool_use` ブロックを出した時点で、親プロセスが
-ターンを打ち切って `tool_calls` として HTTP 応答を作る。`tool_use` は実行より前に
-出力ストリームへ流れてくるので、shim の `tools/call` は通常呼ばれない。
-ここまで到達した場合、shim は「ツールの結果は API クライアント側が返す」というエラーを返す。
-偽の結果を返すとモデルがそれを前提に推論してしまうため。
+Tools are not executed. The moment the model emits a `tool_use` block, the
+parent process cuts the turn off and builds the HTTP response as
+`tool_calls`. `tool_use` flows through the output stream before execution,
+so the shim's `tools/call` is normally never invoked. If it is reached
+anyway, the shim returns an error saying that tool results come from the API
+client — returning a fake result would make the model reason on top of it.
 
-打ち切りの副作用として `result` イベントが来ないので、ツール呼び出しで終わった
-ターンは CLI の集計を受け取れない。代わりに実測で見つけた2つの情報源から
-トークン数を組み立てる。
+A side effect of the cut-off is that no `result` event arrives, so turns
+that end in a tool call cannot use the CLI's own accounting. Instead, token
+counts are assembled from two sources found by measurement. Input tokens
+come from the usage snapshot on the assistant event; the input side is
+already final at request time, so this is exact. For output tokens,
+`--include-partial-messages` is always added on turns with tools or
+structured output. The `message_delta` event at the end of the message
+carries the final output token count, and the CLI moves on to tool execution
+only after the message closes — so reading up to `message_delta` before
+cutting off yields the exact number at no extra cost.
 
-- 入力: assistant イベントが usage のスナップショットを持ち、入力側は
-  リクエスト時点で確定しているので正確
-- 出力: tools か構造化出力のあるターンでは `--include-partial-messages` を
-  常時付ける。message の最後に来る `message_delta` イベントが確定の
-  出力トークン数を持ち、しかも CLI がツールを実行に移るのは message が
-  閉じた後なので、tool_use で即座に打ち切る代わりに `message_delta` まで
-  読んでから打ち切れば、追加コストなしで確定値が取れる
+Only the duration exists solely in `result`, so cut-off turns cannot report it.
 
-所要時間だけは `result` にしかないため、打ち切られたターンでは報告できない。
+The CLI has a child process (the MCP shim), so the cut-off kills the whole
+process group. Killing only the CLI would leave the shim holding the output
+pipe open.
 
-CLI は子プロセス (MCP shim) を持つので、打ち切りはプロセスグループごと行う。
-CLI だけを kill すると shim が出力パイプを開いたまま残る。
+The model sees tool names as `mcp__oocla__<name>`. The prefix is stripped
+back to the original name in the response's `tool_calls`, but the model may
+still mention the prefixed name in its text.
 
-モデルから見えるツール名は `mcp__oocla__<name>` になる。応答の `tool_calls` では
-プレフィックスを外して元の名前に戻すが、モデルが本文中でこの名前に言及することはある。
+#### Fallback for environments where MCP is blocked
 
-#### MCP がブロックされる環境でのフォールバック
+Under managed settings (measured: an `allowedMcpServers` allowlist), the CLI
+does not start oocla's MCP server. In that case `mcp_servers` in the init
+event comes up empty, which is where it is detected; the turn is cut off
+immediately and retried by other means. The cut-off happens before the model
+answers, so only the one interrupted call is wasted.
 
-managed settings (実測: `allowedMcpServers` の許可リスト) の環境では、
-CLI が oocla の MCP サーバを起動しない。その場合 init イベントの
-`mcp_servers` が空になるので、そこで検出してターンを即座に打ち切り、
-別の手段でやり直す。モデルの応答前に打ち切るため、無駄になるのは
-中断された呼び出し1回分だけ。
+Detection also runs once at startup to print a warning. Measurement
+confirmed that `claude mcp list` drops servers whose names are not allowed,
+so a `.mcp.json` declaring the shim is placed in the scratch directory to
+see whether it appears in the list. No model is called, so nothing is
+billed. If the managed-settings file is readable, allowed names usable as
+the shim name are attached to the warning as candidates (a best-effort
+direct file read; registry or server-distributed policies are invisible).
+The allowlist may also contain URL-style entries like `http://…`, but
+measurement showed the CLI itself rejects a stdio server under such a name
+even when policy allows it, so those are excluded from the candidates.
+Request-time detection is the real mechanism; the startup probe is only
+advance notice.
 
-起動時にも一度検出して警告を出す。`claude mcp list` は許可されない名前の
-サーバを一覧から消すことを実測で確認したので、scratch ディレクトリに
-`.mcp.json` で shim を宣言して一覧に載るかを見る。モデルを呼ばないので
-課金されない。managed-settings ファイルが読めれば、shim 名として使える
-許可済みの名前を候補として警告に添える (ファイルを直接読む best-effort。
-レジストリやサーバ配布のポリシーは見えない)。許可リストには `http://…` の
-ような URL 形式のエントリも入り得るが、その名前の stdio サーバはポリシーが
-許可していても CLI 自身が受け付けないことを実測したので、候補から除く。
-リクエスト時の検出が本体で、起動時プローブはあくまで予告。
+The retry embeds the tool definitions into the system prompt and forces a
+`{content, tool_calls}` response shape with `--json-schema`. A non-empty
+`tool_calls` is returned as a normal tool call; when it is empty, `content`
+becomes the answer text. Less robust than going through MCP, but better than
+answering in plain text without telling anyone.
 
-やり直しでは、ツール定義をシステムプロンプトに埋め込み、`--json-schema` で
-`{content, tool_calls}` という形の応答を強制する。応答の `tool_calls` が空でなければ
-通常のツール呼び出しとして返し、空なら `content` を本文として返す。
-MCP 経由より頑健さは落ちるが、何も知らせずただの文章で返すよりはよい。
+In measurements, model responses split two ways: filling in `tool_calls` as
+instructed, or trying to call the prompted tool name directly with a
+`tool_use` block. The CLI streams the latter as events too, so both are
+accepted as the same request.
 
-実測では、モデルの応答は2通りに分かれる。指示どおり `tool_calls` を埋めるものと、
-プロンプトで示したツール名をそのまま `tool_use` ブロックで呼ぼうとするもの。
-CLI は後者もイベントとして流してくるので、どちらも同じ要求として受け付ける。
+Every schema field gets a description; measurement showed this is required.
+Without descriptions, haiku interpreted `tool_calls` as "a record of past
+calls" and, on the turn after receiving a tool result, filled in the same
+call again — reproducible 3/3. (With thinking enabled it correctly decided
+to report the result; only the mapping onto the response shape was broken.)
+Writing "these are calls to execute now, not a record" in the description
+turned that into 3/3 success.
 
-スキーマの各フィールドには description を書く。これは実測で必要と判明した。
-description なしでは、haiku がツールの結果を受けた次のターンで、`tool_calls` を
-「過去の呼び出しの記録」と解釈して同じ呼び出しを埋める失敗が 3/3 で再現した
-(thinking を出させると「結果を伝えよう」と正しく判断しており、壊れていたのは
-応答形式への写しだけ)。「今から実行してほしい呼び出しであり、記録ではない」と
-description に書いたら 3/3 で成功に変わった。
+Per-model scores (`scripts/verify-prompt-tools.sh`, measured 2026-07):
 
-モデル別の成績 (`scripts/verify-prompt-tools.sh`、2026-07 実測):
-
-| モデル | ツール呼び出し | ツールを使わない判断 | 結果を受けて回答 |
+| Model | Tool call | Declining tools | Answer from result |
 | --- | --- | --- | --- |
 | opus | 5/5 | 2/2 | 3/3 |
 | sonnet | 5/5 | 2/2 | 3/3 |
 | haiku | 5/5 | 2/2 | 3/3 |
 | fable | 5/5 | 2/2 | 3/3 |
 
-`oocla serve --internal-prompt-tools` を付けると、MCP を使わず常にこの方式で動く。
-フォールバックのデバッグ用。MCP が恒常的にブロックされる環境では、
-検出のための中断呼び出し1回を毎リクエスト節約する効果もある。
+With `oocla serve --internal-prompt-tools`, MCP is never used and this mode
+is always on — meant for debugging the fallback. In environments where MCP
+is permanently blocked, it also saves the one interrupted detection call per
+request.
 
-制約: この応答形式が `--json-schema` を占有するため、tools と `format`
-(構造化出力 / JSON モード) の併用はこの環境では成立しない。その場合は
-理由を書いたエラーを返す。黙って tools を無視することはしない。
+Constraint: this response shape occupies `--json-schema`, so tools cannot be
+combined with `format` (structured output / JSON mode) in this environment.
+That case returns an error stating the reason; tools are never silently
+dropped.
 
-管理者が oocla 用の別名を許可リストに登録している環境向けに、
-`oocla serve --internal-mcp-shim-name <name>` で shim の登録名を差し替えられる。
-MCP 設定・`--allowedTools`・ツール名プレフィックスの除去がすべてこの名前に従う。
-これは管理者が発行した名前に合わせるためのもので、他の許可済みサーバの名前を
-名乗るためのものではない。正攻法は管理者に oocla を許可リストへ登録してもらうこと。
+For environments where an administrator has allowlisted a different name for
+oocla, `oocla serve --internal-mcp-shim-name <name>` changes the shim's
+registration name. The MCP config, `--allowedTools`, and tool-name prefix
+stripping all follow it. This exists to match a name issued by the
+administrator, not to impersonate other allowed servers; the proper route is
+getting oocla itself allowlisted.
 
-### モデル名
+### Model names
 
-どちらの API でも同じ名前を受け付ける。
+Both APIs accept the same names.
 
-| クライアント側 | `--model` に渡す値 |
+| Client side | Value passed to `--model` |
 | --- | --- |
-| `opus`, `opus:latest`, `opus:5` (解決済みバージョン) | `opus` |
-| `sonnet`, `haiku`, `fable` およびタグ付き | 同名 |
-| `claude-` で始まる名前 | そのまま渡す |
+| `opus`, `opus:latest`, `opus:5` (resolved version) | `opus` |
+| `sonnet`, `haiku`, `fable` and their tagged forms | Same name |
+| Names starting with `claude-` | Passed through |
 
-受け付けるタグは `latest` と、その時点で解決済みのバージョンの 2 つだけ。
-それ以外は 404 を返す。特定リビジョンを提供する手段がないため。
+Only two tags are accepted: `latest` and the currently resolved version.
+Anything else is a 404, since there is no way to serve a specific revision.
 
-`/api/tags` はこの一覧を返す。実体がないので `size` と `digest` は
-モデル名から一意に生成する。
+`/api/tags` returns this catalog. With no local files, `size` and `digest`
+are derived deterministically from the model name.
 
-#### バージョンの解決 (起動時プローブ)
+#### Version resolution (startup probe)
 
-CLI はエイリアスを手元のテーブルで実モデル ID に解決しており、
-`--max-turns 0` を付けたゼロターン実行では、API を呼ばずに init イベントで
-解決先の ID (`claude-opus-5` など) を名乗って終了する (実測、2 秒程度)。
+The CLI resolves aliases to real model ids with a local table. A zero-turn
+run with `--max-turns 0` exits without calling the API, announcing the
+resolved id (such as `claude-opus-5`) in the init event (measured: about 2
+seconds).
 
-起動時にエイリアスごとに 1 回この実行を行い、ID から読み取ったバージョンを
-タグとしてカタログに反映する (`opus:5`、`haiku:4.5`)。`/api/show` の
-`model_info` には `general.version` と解決先の ID (`claude.resolved_model`) が
-入る。
+At startup this run happens once per alias, and the version read from the id
+becomes the catalog tag (`opus:5`, `haiku:4.5`). `/api/show` carries
+`general.version` and the resolved id (`claude.resolved_model`) in
+`model_info`.
 
-プローブはバックグラウンドで並列に走る。完了までは該当エントリが
-`:latest` のまま応答し、失敗したエントリはそのまま `:latest` で残る。
-プローブの結果でカタログが悪化することはない。
+Probes run in the background, in parallel. Until one completes, the entry
+keeps answering as `:latest`; failed entries simply stay `:latest`. Probe
+results never make the catalog worse.
 
-### Ollama 互換の細部
+### Ollama compatibility details
 
-クライアントの実装 (実例: strands-agents の Ollama プロバイダ) と Ollama の
-実挙動に合わせて決めた点。
+Decisions matched against client implementations (a real example:
+strands-agents' Ollama provider) and Ollama's actual behaviour.
 
-- 終端の応答 (非ストリーミングの応答、およびストリームの最終行) では、
-  統計フィールド 6 つ (`total_duration` `load_duration` `prompt_eval_count`
-  `prompt_eval_duration` `eval_count` `eval_duration`) を値が 0 でも必ず出す。
-  実際の Ollama では常に値が入るため、クライアントは存在チェックなしで
-  読む。フィールドが欠けると、たとえば strands は
-  `prompt_eval_count + eval_count` の加算で None 参照になって落ちる
-- 逆に途中のチャンクには統計フィールドを載せない。Ollama のチャンクにも
-  載っていない
-- `load_duration` と `prompt_eval_duration` は計測対象が存在しないため常に 0
-- 空の `messages` (`/api/chat`) と空の `prompt` (`/api/generate`) は
-  プリロード要求。Ollama はこれを「モデルをメモリにロードしておけ」と
-  解釈して生成せずに応答する。oocla にロードするものはないが、同じ形で
-  応答する: モデルを呼ばず `done_reason: "load"`、`keep_alive: 0`
-  (数値でも `"0s"` のような文字列でも) なら `"unload"` を返す。
-  エラーにすると、チャット開始前にウォームアップを送るクライアントが
-  「モデルが使えない」と判断して止まる
+- Terminal responses (a non-streaming response, and the final line of a
+  stream) always carry all six statistics fields (`total_duration`
+  `load_duration` `prompt_eval_count` `prompt_eval_duration` `eval_count`
+  `eval_duration`), even when a value is 0. Real Ollama always fills them,
+  so clients read them without existence checks. If one is missing, strands,
+  for instance, crashes on a None reference when adding
+  `prompt_eval_count + eval_count`
+- Mid-stream chunks, conversely, carry no statistics fields. Ollama's chunks
+  do not either
+- `load_duration` and `prompt_eval_duration` are always 0, because there is
+  nothing to time
+- An empty `messages` (`/api/chat`) or an empty `prompt` (`/api/generate`)
+  is a preload request. Ollama reads it as "load the model into memory" and
+  responds without generating. oocla has nothing to load, but answers in the
+  same shape: no model call, `done_reason: "load"`, or `"unload"` when
+  `keep_alive` is 0 (numeric, or a string like `"0s"`). Returning an error
+  instead would make clients that send a warm-up before chatting decide the
+  model is unusable and stop
 
-## ハーネス
+## Harness
 
-`make check` が通ることを「グリーン」と定義する。
+"Green" is defined as `make check` passing.
 
-| コマンド | 内容 |
+| Command | Description |
 | --- | --- |
-| `make fmt` | `gofmt -l` で差分ゼロを確認 |
+| `make fmt` | `gofmt -l` confirms an empty diff |
 | `make vet` | `go vet ./...` |
 | `make test` | `go test -race ./...` |
 | `make build` | `go build ./...` |
-| `make check` | 上4つ |
-| `make e2e` | サーバを起動して適合テストを流す。`claude` の認証済み環境が必要 |
+| `make check` | All four above |
+| `make e2e` | Boots the server and runs the conformance tests. Needs an authenticated `claude` |
 
-標準ライブラリのみ。外部依存を追加しない。
+Standard library only; no external dependencies.
 
-## 構造化出力
+## Structured output
 
-`--json-schema` は CLI 内部で `StructuredOutput` という組み込みツールとして実装されている。
-モデルは本文を出したあとこのツールを呼び、その引数が構造化された答えになる。
-実測して判明した挙動なので、oocla 側で次のように扱う。
+`--json-schema` is implemented inside the CLI as a built-in tool named
+`StructuredOutput`. The model writes some text, then calls this tool, and
+the arguments are the structured answer. This behaviour was established by
+measurement, so oocla handles it as follows.
 
-- スキーマ指定時は `StructuredOutput` の呼び出しを「答え」として扱い、`tool_calls` には出さない
-- それまでの本文は前置きなので捨てる。Ollama は本文を返さないため
-- ストリーミングでも前置きは流さず、確定した JSON を1チャンクで流す
+- With a schema, the `StructuredOutput` call is treated as the answer and
+  never surfaced in `tool_calls`
+- The preceding text is preamble and gets dropped; Ollama returns no text
+  either
+- Streaming also drops the preamble and emits the final JSON as one chunk
 
-`format: "json"` (スキーマなし) では `--json-schema` を使わない。制約する項目がないと
-CLI が答えを `{"output": "..."}` というオブジェクトで包んでしまうため。
-代わりにシステムプロンプトへ一文だけ指示を足す。oocla がプロンプトに文字列を
-足すのはこの一箇所だけで、クライアントが明示的に JSON モードを要求したときに限る。
+`format: "json"` (no schema) does not use `--json-schema`: with nothing to
+constrain, the CLI wraps the answer in an `{"output": "..."}` object.
+Instead, one sentence is appended to the system prompt. This is the only
+place where oocla ever adds text to a prompt, and only when the client
+explicitly asked for JSON mode.
 
-指示だけでは制約しきれないので、モデルは答えを ```json フェンスで包むことがある。
-JSON モードではフェンスを取り除く。取り除いた結果が妥当な JSON のときだけ適用する。
+The instruction alone cannot fully constrain the model, which sometimes
+wraps the answer in a ```json fence. JSON mode strips the fence — only when
+the stripped result is valid JSON.
 
 ## thinking
 
-CLI 側で推論を止める手段はない。モデルは常に考える。したがって `think` が
-制御するのは「クライアントに見せるかどうか」だけになる。これは Ollama の
-仕様とも一致する (要求しない限り応答に thinking は載らない)。
+The CLI has no way to stop reasoning; the model always thinks. So all
+`think` controls is whether the client gets to see it. This also matches
+Ollama's spec: thinking never appears in a response unless requested.
 
-| リクエスト | 挙動 |
+| Request | Behaviour |
 | --- | --- |
-| `think` なし / `false` | thinking を収集せず破棄する |
-| `think: true` | `message.thinking` に載せる。effort はモデル既定 |
-| `think: "low"` / `"medium"` / `"high"` | 載せたうえで `--effort <level>` を渡す |
+| `think` absent / `false` | Thinking is discarded, not collected |
+| `think: true` | Delivered in `message.thinking`; effort is the model default |
+| `think: "low"` / `"medium"` / `"high"` | Delivered, and `--effort <level>` is passed |
 
-`"xhigh"` と `"max"` も CLI が受け付けるので通す。Ollama の仕様にはないが、
-Claude を前提にしたクライアントから届く可能性がある。
+`"xhigh"` and `"max"` are passed through too, since the CLI accepts them.
+They are not in Ollama's spec, but can arrive from clients written with
+Claude in mind.
 
 ## options
 
-Ollama の `options` はローカルの llama.cpp ランナーを設定するためのもので、
-`claude` CLI には対応する設定がほとんどない。拒否せず、無視して警告ログに出す。
-クライアントは中身を気にしていなくても options ブロックを送ってくるし、
-Ollama 自身もモデルが実装していないオプションは無視するため。
+Ollama's `options` configure a local llama.cpp runner, and the `claude` CLI
+has almost no counterparts. They are not rejected: they are ignored with a
+logged warning. Clients send an options block whether or not they care about
+its contents, and Ollama itself ignores options a model does not implement.
 
-唯一 `stop` だけは実装する。サンプリングを止めることはできないので、
-出力を最初の stop シーケンスで切る。ストリーミングでは、チャンク境界を
-またぐシーケンスを取りこぼさないよう、まだ途中かもしれない末尾を保留する。
-偽陽性 (`EN` が `END` ではなく `ENOUGH` だった) の場合は保留分をそのまま出力する。
+`stop` alone is implemented. Sampling cannot be stopped, so the output is
+cut at the first stop sequence. When streaming, a tail that might still be
+mid-sequence is held back, so a sequence spanning chunk boundaries is not
+missed. On a false positive (the `EN` was `ENOUGH`, not `END`), the held
+tail is emitted as-is.
 
-## OpenAI 互換層
+## OpenAI compatibility layer
 
-Ollama は自前の API と並べて OpenAI 互換のエンドポイント群も提供しており、
-OpenAI SDK で書かれたクライアントはそちらを使う。oocla も同じ経路を用意する。
+Ollama serves an OpenAI-compatible endpoint family alongside its own API,
+and clients written with the OpenAI SDK use that. oocla provides the same
+route.
 
-| パス | 内容 |
+| Path | Description |
 | --- | --- |
-| `POST /v1/chat/completions` | 本体。SSE ストリーミング対応 |
-| `GET /v1/models` | モデル一覧 |
-| `GET /v1/models/{model}` | 単体 |
+| `POST /v1/chat/completions` | The main endpoint. SSE streaming supported |
+| `GET /v1/models` | Model list |
+| `GET /v1/models/{model}` | Single model |
 
-`internal/openai` が入出力の型を `core.ChatSpec` に直接変換し、Ollama 側と
-同じ `core.Engine` に流す。Ollama 側の型は経由しない。差分だけ挙げる。
+`internal/openai` converts its request/response types directly into
+`core.ChatSpec` and feeds the same `core.Engine`; the Ollama types are never
+involved. Only the differences:
 
-- `stream` の既定値が false。Ollama 側は true
-- ツール引数はオブジェクトではなく JSON 文字列
-- ツール結果は `tool_call_id` で呼び出しを指す。ツール名は先行する
-  `tool_calls` を参照して求める
-- `content` は文字列と typed part の配列の両方を受ける。text 以外の part は 400
-- `developer` ロールは system として扱う
-- `reasoning_effort` を `think` と同じ effort レベルに対応づける
-- エラーは `{"error":{"message":...,"type":...}}` の入れ子。Ollama の平坦な形と違う
-- thinking は `reasoning` フィールドに載せる。OpenAI に該当フィールドがないため
+- `stream` defaults to false. The Ollama side defaults to true
+- Tool arguments are JSON strings, not objects
+- Tool results reference calls by `tool_call_id`; the tool name is recovered
+  from the preceding `tool_calls`
+- `content` accepts both a string and an array of typed parts; non-text
+  parts are 400
+- The `developer` role is treated as system
+- `reasoning_effort` maps to the same effort levels as `think`
+- Errors use the nested `{"error":{"message":...,"type":...}}` shape, unlike
+  Ollama's flat one
+- Thinking is delivered in a `reasoning` field, since OpenAI has no
+  equivalent
 
-## 後始末
+## Cleanup
 
-- 作業ディレクトリは oocla が作った一時ディレクトリ。SIGINT / SIGTERM を受けて
-  意図的に終了し、実行中のリクエストを待ってからこれを削除する
-- `--no-session-persistence` を付けている限り CLI はトランスクリプトを
-  書かないはずだが、保険として、作業ディレクトリから導出される
-  `~/.claude/projects/<cwd をエンコードした名前>/` も終了時に削除する。
-  ディレクトリ名に `oocla-cwd-` を含むときにしか導出しない
+The working directory is a temporary directory that oocla created. On a
+deliberate shutdown via SIGINT / SIGTERM, in-flight requests are awaited and
+then the directory is removed.
+
+As long as `--no-session-persistence` is passed, the CLI should write no
+transcripts. As insurance, `~/.claude/projects/<encoded cwd>/`, derived from
+the working directory, is also removed at shutdown — and it is only derived
+when the directory name contains `oocla-cwd-`.
