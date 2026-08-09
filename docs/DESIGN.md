@@ -37,6 +37,7 @@ Ollama API と OpenAI API の両方に対応した HTTP サーバを立て、バ
 | 構造化出力 | `--json-schema <schema>` | Ollama の `format` に対応づける |
 | ストリーム | `--output-format stream-json --verbose` | NDJSON でイベントが流れる |
 | トークンの逐次出力 | `--include-partial-messages` | 部分チャンクが流れる |
+| エイリアスの解決先 | `--max-turns 0` | API を呼ばず、init イベントに解決済みモデル ID が載って終了する |
 
 `--bare` は使わない。認証が `ANTHROPIC_API_KEY` / apiKeyHelper に限定されてしまい、
 OAuth 認証の環境で動かなくなるため。実測では `--bare` なしで
@@ -261,12 +262,52 @@ MCP 設定・`--allowedTools`・ツール名プレフィックスの除去がす
 
 | クライアント側 | `--model` に渡す値 |
 | --- | --- |
-| `opus`, `opus:latest` | `opus` |
-| `sonnet`, `haiku`, `fable` および `:latest` 付き | 同名 |
+| `opus`, `opus:latest`, `opus:5` (解決済みバージョン) | `opus` |
+| `sonnet`, `haiku`, `fable` およびタグ付き | 同名 |
 | `claude-` で始まる名前 | そのまま渡す |
+
+受け付けるタグは `latest` と、その時点で解決済みのバージョンの 2 つだけ。
+それ以外は 404 を返す。特定リビジョンを提供する手段がないため。
 
 `/api/tags` はこの一覧を返す。実体がないので `size` と `digest` は
 モデル名から一意に生成する。
+
+#### バージョンの解決 (起動時プローブ)
+
+CLI はエイリアスを手元のテーブルで実モデル ID に解決しており、
+`--max-turns 0` を付けたゼロターン実行では、API を呼ばずに init イベントで
+解決先の ID (`claude-opus-5` など) を名乗って終了する (実測、2 秒程度)。
+
+起動時にエイリアスごとに 1 回この実行を行い、ID から読み取ったバージョンを
+タグとしてカタログに反映する (`opus:5`、`haiku:4.5`)。`/api/show` の
+`model_info` には `general.version` と解決先の ID (`claude.resolved_model`) が
+入る。
+
+プローブはバックグラウンドで並列に走る。完了までは該当エントリが
+`:latest` のまま応答し、失敗したエントリはそのまま `:latest` で残る。
+プローブの結果でカタログが悪化することはない。
+
+### Ollama 互換の細部
+
+クライアントの実装 (実例: strands-agents の Ollama プロバイダ) と Ollama の
+実挙動に合わせて決めた点。
+
+- 終端の応答 (非ストリーミングの応答、およびストリームの最終行) では、
+  統計フィールド 6 つ (`total_duration` `load_duration` `prompt_eval_count`
+  `prompt_eval_duration` `eval_count` `eval_duration`) を値が 0 でも必ず出す。
+  実際の Ollama では常に値が入るため、クライアントは存在チェックなしで
+  読む。フィールドが欠けると、たとえば strands は
+  `prompt_eval_count + eval_count` の加算で None 参照になって落ちる
+- 逆に途中のチャンクには統計フィールドを載せない。Ollama のチャンクにも
+  載っていない
+- `load_duration` と `prompt_eval_duration` は計測対象が存在しないため常に 0
+- 空の `messages` (`/api/chat`) と空の `prompt` (`/api/generate`) は
+  プリロード要求。Ollama はこれを「モデルをメモリにロードしておけ」と
+  解釈して生成せずに応答する。oocla にロードするものはないが、同じ形で
+  応答する: モデルを呼ばず `done_reason: "load"`、`keep_alive: 0`
+  (数値でも `"0s"` のような文字列でも) なら `"unload"` を返す。
+  エラーにすると、チャット開始前にウォームアップを送るクライアントが
+  「モデルが使えない」と判断して止まる
 
 ## ハーネス
 
