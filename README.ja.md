@@ -12,6 +12,8 @@ oocla を使うと、Ollama API / OpenAI API のクライアントから Claude 
 効きます。モデルは `opus` / `sonnet` / `haiku` といった名前で
 リクエストできます。名前は OpenAI + Ollama + CLAude に由来します。
 
+![デモ: 左のペインで oocla serve を起動し、右のペインで ollama CLI が Claude から応答を受け取る](docs/demo.gif)
+
 ```
 $ oocla serve
 oocla listening on 127.0.0.1:11434
@@ -166,6 +168,17 @@ print(res.choices[0].message.content)
 
 このほかのツールも、Ollama か OpenAI 互換サーバに繋がるものなら、
 接続先を `http://127.0.0.1:11434` に向けるだけで使えます。
+
+実サーバで動作を確認したクライアント (2026-08):
+
+| クライアント | バージョン | 確認した内容 |
+| --- | --- | --- |
+| `ollama` CLI | 0.15.0 | ワンショットの `ollama run`。ストリーミングと thinking 表示 |
+| `ollama` (Python) | 0.6.2 | `chat()` |
+| `openai` (Python SDK) | 2.52.0 | `chat.completions.create()` |
+
+冒頭のデモ GIF も実サーバに対して `vhs` で録画したものです
+(`docs/demo.tape`)。
 
 ## モデル名
 

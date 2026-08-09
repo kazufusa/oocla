@@ -12,6 +12,8 @@ the `claude` CLI — whatever login the CLI already has, subscription or API
 key, just works. Request models by names like `opus` / `sonnet` / `haiku`.
 The name is OpenAI + Ollama + CLAude.
 
+![Demo: oocla serve in the left pane; in the right pane the ollama CLI gets an answer from Claude](docs/demo.gif)
+
 ```
 $ oocla serve
 oocla listening on 127.0.0.1:11434
@@ -167,6 +169,17 @@ print(res.choices[0].message.content)
 
 Anything else that talks to Ollama or to an OpenAI-compatible server can be
 pointed at `http://127.0.0.1:11434` the same way.
+
+Clients verified against a real server (2026-08):
+
+| Client | Version | Verified |
+| --- | --- | --- |
+| `ollama` CLI | 0.15.0 | One-shot `ollama run`, streamed output, thinking display |
+| `ollama` (Python) | 0.6.2 | `chat()` |
+| `openai` (Python SDK) | 2.52.0 | `chat.completions.create()` |
+
+The demo GIF above was recorded against a real server with `vhs`
+(`docs/demo.tape`).
 
 ## Model names
 
