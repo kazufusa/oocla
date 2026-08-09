@@ -1,11 +1,16 @@
 # oocla
 
+[![ci](https://github.com/kazufusa/oocla/actions/workflows/ci.yml/badge.svg)](https://github.com/kazufusa/oocla/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/kazufusa/oocla)](https://github.com/kazufusa/oocla/releases)
+[![license](https://img.shields.io/github/license/kazufusa/oocla)](LICENSE)
+
 [English](README.md)
 
-Ollama API と OpenAI API の両方に対応した HTTP サーバを立て、バックエンドで
-`claude` CLI を呼びます。どちらの API のクライアントからも
-`opus` / `sonnet` / `haiku` といったモデル名でリクエストできます。
-名前は OpenAI + Ollama + CLAude に由来します。
+oocla を使うと、Ollama API / OpenAI API のクライアントから Claude を
+呼び出せます。すべてのリクエストをログイン済みの `claude` CLI 経由で
+処理するので、サブスクリプションでも API キーでも、CLI の認証がそのまま
+効きます。モデルは `opus` / `sonnet` / `haiku` といった名前で
+リクエストできます。名前は OpenAI + Ollama + CLAude に由来します。
 
 ```
 $ oocla serve
@@ -26,6 +31,14 @@ $ curl localhost:11434/v1/chat/completions -d '{
 {"id":"chatcmpl-1","object":"chat.completion","model":"haiku:4.5",
  "choices":[{"index":0,"message":{"role":"assistant","content":"Tokyo"},"finish_reason":"stop"}], ...}
 ```
+
+## oocla の使いどころ
+
+- チャット UI、エディタ、エージェントフレームワークなど、Ollama API /
+  OpenAI API 対応のツールは既に数多くあります
+- `claude` CLI には、Claude の認証が既に入っています
+- oocla はこの 2 つを繋ぎます。単一バイナリで、何も保存せず、認証情報も
+  管理しません
 
 ## 方針
 
@@ -69,7 +82,7 @@ oocla serve
 - 起動時に各エイリアスの解決先モデルを CLI に問い合わせ、カタログに
   バージョンを反映します (「モデル名」の節を参照)
 
-設計判断と、根拠にした実測の記録は `docs/DESIGN.md` にあります。
+設計判断と、根拠にした実測の記録は `docs/DESIGN.ja.md` にあります。
 
 ## 必要なもの
 
@@ -126,6 +139,34 @@ oocla serve [オプション]
 `SIGINT` / `SIGTERM` で停止します。停止時は実行中のリクエストを待ってから、
 作業用の一時ディレクトリを削除します。
 
+### クライアントの例
+
+Python の `ollama` パッケージから:
+
+```python
+from ollama import Client
+
+client = Client(host="http://127.0.0.1:11434")
+res = client.chat(model="haiku",
+                  messages=[{"role": "user", "content": "Capital of Japan?"}])
+print(res["message"]["content"])
+```
+
+OpenAI SDK から:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="unused")
+res = client.chat.completions.create(
+    model="sonnet",
+    messages=[{"role": "user", "content": "Capital of Japan?"}])
+print(res.choices[0].message.content)
+```
+
+このほかのツールも、Ollama か OpenAI 互換サーバに繋がるものなら、
+接続先を `http://127.0.0.1:11434` に向けるだけで使えます。
+
 ## モデル名
 
 | リクエストする名前 | `claude --model` に渡す値 |
@@ -181,7 +222,7 @@ $ curl localhost:11434/api/chat -d '{
 managed settings が MCP サーバの起動を許可しない環境もあります。
 その場合は、モデルが応答する前にブロックを検出して別方式に切り替わります。
 ツール定義をシステムプロンプトに埋め込み、`--json-schema` で応答の形を
-固定する方式です (詳細は `docs/DESIGN.md`)。
+固定する方式です (詳細は `docs/DESIGN.ja.md`)。
 
 | オプション | 内容 |
 | --- | --- |
@@ -221,7 +262,7 @@ Claude Code 本来のエージェント用プロンプト (数千トークン) �
 完全に消すには `oocla serve --bare` を使います。ただしこのモードでは
 `claude` CLI が `ANTHROPIC_API_KEY` または apiKeyHelper しか読まなくなり、
 OAuth ログインでは動きません。`--agents` / `--safe-mode` などの実測結果も含め、
-詳細は `docs/DESIGN.md` にあります。
+詳細は `docs/DESIGN.ja.md` にあります。
 
 そのほかに対応しないものは次のとおりです。
 
@@ -250,4 +291,4 @@ make dist    # dist/ にリリース成果物を作る
 `make dist VERSION=v1.2.0` を実行すれば、同じものが手元にできます。
 `v1.2.0-rc1` のようにハイフンを含むタグはプレリリース扱いになります。
 
-設計と実測結果は `docs/DESIGN.md` にあります。
+設計と実測結果は `docs/DESIGN.ja.md` にあります。
